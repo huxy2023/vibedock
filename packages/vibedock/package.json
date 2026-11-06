@@ -1,0 +1,67 @@
+{
+  "name": "vibedock",
+  "version": "0.0.1",
+  "description": "VibeDock — Self-Hosted AI-Native Team App & Database Cloud (Hono + TypeScript + Caddy + Docker DBs + AI Skill)",
+  "type": "module",
+  "main": "./dist/server.js",
+  "bin": {
+    "vibedock": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "public",
+    "data/catalog.json",
+    "docker",
+    "scripts",
+    "skill-template",
+    "ecosystem.config.cjs"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli/main.js dist/skill/client.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "init": "node dist/cli/main.js init",
+    "doctor": "node dist/cli/main.js doctor",
+    "pack-skill": "node dist/cli/main.js pack-skill",
+    "db:up": "node dist/cli/main.js db up",
+    "db:status": "node dist/cli/main.js db status",
+    "db:provision": "node dist/cli/main.js db provision",
+    "test": "pnpm run build && node --test"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huxy2023/vibedock.git",
+    "directory": "packages/vibedock"
+  },
+  "homepage": "https://github.com/huxy2023/vibedock#readme",
+  "bugs": {
+    "url": "https://github.com/huxy2023/vibedock/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "vibedock",
+    "paas",
+    "self-hosted",
+    "ai-skill",
+    "hono",
+    "caddy",
+    "claude-code",
+    "codex",
+    "cursor"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "hono": "^4.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "typescript": "^5.7.3"
+  }
+}

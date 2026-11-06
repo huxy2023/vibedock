@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply bg-zinc-50 text-zinc-900 antialiased selection:bg-zinc-900 selection:text-white;
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+
+  code, pre {
+    font-family: "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+}
+
+.chat-markdown {
+  @apply text-sm leading-relaxed text-zinc-800 space-y-2;
+}
+.chat-markdown p {
+  @apply my-1.5;
+}
+.chat-markdown ul, .chat-markdown ol {
+  @apply pl-5 my-1.5 list-disc space-y-1;
+}
+.chat-markdown code {
+  @apply px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-900 text-xs font-mono border border-zinc-200/80;
+}
+.chat-markdown pre {
+  @apply p-3 rounded-lg bg-zinc-950 text-zinc-100 text-xs overflow-x-auto my-2;
+}
+.chat-markdown pre code {
+  @apply bg-transparent text-zinc-100 border-0 p-0;
+}

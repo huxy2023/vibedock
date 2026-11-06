@@ -1,0 +1,30 @@
+{
+  "name": "vibedock-monorepo",
+  "version": "0.0.1",
+  "private": true,
+  "description": "VibeDock Monorepo — Self-Hosted AI-Native Team App & Database Cloud",
+  "type": "module",
+  "scripts": {
+    "build:web": "pnpm --filter @vibedock/web build",
+    "build:server": "pnpm --filter vibedock build",
+    "build:docs": "pnpm --filter @vibedock/docs build",
+    "build": "pnpm build:web && pnpm build:server",
+    "dev:web": "pnpm --filter @vibedock/web dev",
+    "dev:server": "pnpm --filter vibedock start",
+    "vibedock": "node packages/vibedock/dist/cli/main.js",
+    "init": "node packages/vibedock/dist/cli/main.js init",
+    "doctor": "node packages/vibedock/dist/cli/main.js doctor",
+    "pack-skill": "node packages/vibedock/dist/cli/main.js pack-skill",
+    "db:up": "node packages/vibedock/dist/cli/main.js db up",
+    "db:status": "node packages/vibedock/dist/cli/main.js db status",
+    "db:provision": "node packages/vibedock/dist/cli/main.js db provision",
+    "docs:dev": "pnpm --filter @vibedock/docs dev",
+    "docs:build": "pnpm --filter @vibedock/docs build",
+    "check": "pnpm --filter @vibedock/web check && pnpm --filter vibedock check",
+    "test": "pnpm build && pnpm --filter vibedock test"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}

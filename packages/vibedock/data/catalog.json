@@ -1,0 +1,156 @@
+{
+  "environment": {
+    "name": "VibeDock Server",
+    "brandName": "VibeDock",
+    "skillName": "vibedock-deploy",
+    "hostname": "vibedock-node",
+    "address": "127.0.0.1",
+    "domainSuffix": "127.0.0.1.nip.io",
+    "backupDomainSuffix": "",
+    "gateway": "Caddy 2",
+    "gatewayPort": 80,
+    "gatewayTlsPort": 443
+  },
+  "projects": [
+    {
+      "id": "vibedock-portal",
+      "name": "VibeDock 应用与开发者门户",
+      "shortName": "portal",
+      "aliases": [
+        "门户",
+        "导航",
+        "开发者中心"
+      ],
+      "description": "团队内部应用目录、共享数据库开通指引、AI 部署 Skill 下载与在线 AI 诊断工作台。",
+      "color": "blue",
+      "tags": [
+        "平台底座",
+        "Node.js",
+        "SQLite"
+      ],
+      "components": [
+        {
+          "id": "portal-web",
+          "name": "Portal HTTP Server",
+          "role": "门户与诊断 API",
+          "type": "fullstack",
+          "runtime": "Node.js",
+          "processManager": "PM2",
+          "processName": "vibedock-portal",
+          "listeners": [
+            {
+              "id": "http",
+              "name": "HTTP",
+              "protocol": "http",
+              "host": "127.0.0.1",
+              "port": 39090,
+              "healthPath": "/api/health"
+            }
+          ]
+        }
+      ],
+      "ingressRules": [
+        {
+          "id": "portal-main",
+          "name": "主入口",
+          "match": {
+            "scheme": "http",
+            "hosts": [
+              "portal.127.0.0.1.nip.io"
+            ],
+            "paths": [
+              "/*"
+            ],
+            "protocol": "http"
+          },
+          "target": {
+            "component": "portal-web",
+            "listener": "http"
+          }
+        }
+      ]
+    },
+    {
+      "id": "team-demo-hub",
+      "name": "团队演示看板 (Demo Hub)",
+      "shortName": "demo-hub",
+      "description": "通过 vibedock-deploy Skill 一键发布的团队全栈示例应用（含 PostgreSQL 持久化便签看板）。",
+      "owner": "开发团队",
+      "category": "团队作品",
+      "managedBy": "vibedock-deploy",
+      "color": "teal",
+      "tags": [
+        "团队作品",
+        "PostgreSQL",
+        "Node.js"
+      ],
+      "components": [
+        {
+          "id": "web",
+          "name": "web",
+          "role": "静态前端",
+          "type": "static",
+          "runtime": "Caddy Static",
+          "staticRoot": "/var/lib/vibedock/apps/demo-hub/current/web",
+          "listeners": []
+        },
+        {
+          "id": "api",
+          "name": "api",
+          "role": "Node 服务",
+          "type": "backend",
+          "runtime": "Node.js",
+          "processManager": "PM2 (vibe-deploy)",
+          "processName": "team-demo-hub-api",
+          "listeners": [
+            {
+              "id": "http",
+              "name": "HTTP",
+              "protocol": "http",
+              "host": "127.0.0.1",
+              "port": 40000,
+              "healthPath": "/api/health"
+            }
+          ]
+        }
+      ],
+      "ingressRules": [
+        {
+          "id": "route-0",
+          "name": "api",
+          "match": {
+            "scheme": "http",
+            "hosts": [
+              "team-demo-hub.127.0.0.1.nip.io"
+            ],
+            "paths": [
+              "/api/*"
+            ],
+            "protocol": "http"
+          },
+          "target": {
+            "component": "api",
+            "listener": "http"
+          }
+        },
+        {
+          "id": "route-1",
+          "name": "web",
+          "match": {
+            "scheme": "http",
+            "hosts": [
+              "team-demo-hub.127.0.0.1.nip.io"
+            ],
+            "paths": [
+              "/*"
+            ],
+            "protocol": "http"
+          },
+          "target": {
+            "component": "web"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+name: vibedock-db
+
+services:
+  postgresql:
+    image: postgres:16-alpine
+    container_name: vibedock-postgres
+    profiles: ["postgresql", "all"]
+    restart: unless-stopped
+    ports:
+      - "${VIBEDOCK_PG_BIND:-0.0.0.0}:${VIBEDOCK_PG_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: "${VIBEDOCK_PG_USER:-postgres}"
+      POSTGRES_PASSWORD: "${VIBEDOCK_PG_PASSWORD:?VIBEDOCK_PG_PASSWORD is required}"
+      POSTGRES_DB: "postgres"
+    volumes:
+      - "${VIBEDOCK_DB_DATA_DIR:-../data/databases}/postgresql/data:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql:
+    image: mysql:8.0
+    container_name: vibedock-mysql
+    profiles: ["mysql", "all"]
+    restart: unless-stopped
+    ports:
+      - "${VIBEDOCK_MYSQL_BIND:-0.0.0.0}:${VIBEDOCK_MYSQL_PORT:-3306}:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: "${VIBEDOCK_MYSQL_PASSWORD:?VIBEDOCK_MYSQL_PASSWORD is required}"
+    volumes:
+      - "${VIBEDOCK_DB_DATA_DIR:-../data/databases}/mysql/data:/var/lib/mysql"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:8.0
+    container_name: vibedock-mongodb
+    profiles: ["mongodb", "all"]
+    restart: unless-stopped
+    ports:
+      - "${VIBEDOCK_MONGO_BIND:-0.0.0.0}:${VIBEDOCK_MONGO_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "${VIBEDOCK_MONGO_USER:-admin}"
+      MONGO_INITDB_ROOT_PASSWORD: "${VIBEDOCK_MONGO_PASSWORD:?VIBEDOCK_MONGO_PASSWORD is required}"
+    volumes:
+      - "${VIBEDOCK_DB_DATA_DIR:-../data/databases}/mongodb/data:/data/db"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "127.0.0.1:27017/admin", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: vibedock-redis
+    profiles: ["redis", "all"]
+    restart: unless-stopped
+    ports:
+      - "${VIBEDOCK_REDIS_BIND:-0.0.0.0}:${VIBEDOCK_REDIS_PORT:-6379}:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${VIBEDOCK_REDIS_PASSWORD:?VIBEDOCK_REDIS_PASSWORD is required}"
+    volumes:
+      - "${VIBEDOCK_DB_DATA_DIR:-../data/databases}/redis/data:/data"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${VIBEDOCK_REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

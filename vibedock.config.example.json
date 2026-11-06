@@ -1,0 +1,31 @@
+{
+  "brandName": "VibeDock",
+  "portalTitle": "VibeDock · 团队应用与开发者门户",
+  "skillName": "vibedock-deploy",
+  "serverHost": "127.0.0.1",
+  "sshPort": 22,
+  "deployUser": "vibe-deploy",
+  "appPrefix": "team-",
+  "domainMode": "nip",
+  "primaryDomain": "127.0.0.1.nip.io",
+  "backupDomain": "",
+  "portalUrl": "http://127.0.0.1:39090",
+  "portRange": {
+    "start": 40000,
+    "end": 40999
+  },
+  "paths": {
+    "dataDir": "./data",
+    "appsDir": "/var/lib/vibe-deploy/apps",
+    "caddyBin": "caddy",
+    "caddyConfig": "/etc/caddy/Caddyfile",
+    "caddySitesDir": "/etc/caddy/sites",
+    "dbSecretsDir": "./data/secrets/databases",
+    "skillZipFile": "./data/vibedock-deploy.zip"
+  },
+  "databases": {
+    "mode": "docker",
+    "composeFile": "./docker/docker-compose.db.yml",
+    "enabled": ["postgresql", "mysql", "mongodb", "redis"]
+  }
+}
