@@ -40,12 +40,19 @@ node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && ( [ ! -f p
 
 ### 方式 B：Python 服务（推荐使用 `uv`）
 ```bash
-node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && uv sync && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && pm2 start .venv/bin/uvicorn --name {{APP_PREFIX}}demo-api -- main:app --host 127.0.0.1 --port 40001 && pm2 save'
+node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && uv sync && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && pm2 start .venv/bin/uvicorn --name {{APP_PREFIX}}demo-api --interpreter none -- main:app --host 127.0.0.1 --port 40001 && pm2 save'
 ```
 
-### 方式 C：Go 服务（单二进制文件）
+### 方式 C：Go 服务（本地交叉编译为 Linux 单二进制文件后上传）
 ```bash
-node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && go build -o app . && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && HOST=127.0.0.1 PORT=40001 pm2 start ./app --name {{APP_PREFIX}}demo-api && pm2 save'
+# 1. 自动识别服务器 CPU 架构 (aarch64 -> arm64, x86_64 -> amd64)，在本地交叉编译并上传
+ARCH=$(node scripts/client.mjs exec 'uname -m' | tr -d '\r\n')
+GOARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "amd64")
+CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH go build -o ./dist-api/app .
+node scripts/client.mjs upload ./dist-api {{APPS_DIR}}/demo/releases/v1/api
+
+# 2. 在服务器端赋权并交由 PM2 守护启动
+node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && chmod +x ./app && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && HOST=127.0.0.1 PORT=40001 pm2 start ./app --name {{APP_PREFIX}}demo-api && pm2 save'
 ```
 
 切换 `current` 软链：
