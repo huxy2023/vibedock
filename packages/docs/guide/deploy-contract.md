@@ -20,8 +20,11 @@ node ~/.claude/skills/vibedock-deploy/scripts/client.mjs upload ./dist /var/lib/
 # 5. 在受限账号下启动/更新 PM2 守护进程并切换 current 软链
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs exec 'ln -sfn /var/lib/vibedock/apps/my-app/releases/v1 /var/lib/vibedock/apps/my-app/current'
 
-# 6. 提交 publish.json 原子生成 Caddy 路由、挂载 HTTPS 证书并登记门户卡片
+# 6. 提交 publish.json 原子生成 Caddy/Nginx 路由、挂载 HTTPS 证书并登记门户卡片
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs publish ./publish.json
+
+# 6b. 或一键纳管宿主机/内网已运行的存量服务 (无需上传代码目录，直接分配子域名与门户卡片)
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs adopt legacy-erp --upstream http://127.0.0.1:18080 --name "存量 ERP 系统"
 
 # 7. 查看远程 PM2 日志或一键下架应用
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs logs my-app --lines 80
@@ -67,7 +70,7 @@ node ~/.claude/skills/vibedock-deploy/scripts/client.mjs unpublish my-app
 | :--- | :--- | :--- | :--- |
 | `id` | `string` | 是 | 小写字母、数字与连字符（`2-40` 位），自动映射子域名 `team-<id>.<primaryDomain>` |
 | `name` | `string` | 是 | 展示在 VibeDock 门户上的应用名称 |
-| `components` | `Array` | 是 | 组件列表：`kind: "static"`（静态目录，支持 `routing: "spa"`）或 `kind: "service"`（监听 `127.0.0.1:<port>` 的常驻进程） |
+| `components` | `Array` | 是 | 组件列表：`kind: "static"`（静态目录，支持 `routing: "spa"`）、`kind: "service"`（监听 `127.0.0.1:<port>` 的常驻进程）或 `kind: "external"`（通过 `upstream: "http://host:port"` 纳管本机/内网已有服务） |
 | `routes` | `Array` | 否 | 路由匹配规则（如 `/api/*` 转发给 `api` 组件，`/*` 转发给 `web` 组件） |
 | `owner` | `string` | 否 | 负责人姓名或团队名称 |
 | `tags` | `string[]` | 否 | 门户卡片展示的技术栈或业务标签 |

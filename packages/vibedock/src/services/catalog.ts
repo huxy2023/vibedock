@@ -82,7 +82,7 @@ export function validateCatalog(catalog: CatalogData): CatalogData {
           assert(net.isIP(listener.host) !== 0 || isValidHostname(listener.host), `invalid remote host for ${project.id}/${component.id}/${listener.id}`);
         }
         assert(Number.isInteger(listener.port) && listener.port > 0 && listener.port < 65536, `invalid port for ${project.id}/${component.id}/${listener.id}`);
-        assert(['http', 'websocket', 'tcp'].includes(listener.protocol), `invalid listener protocol for ${project.id}/${component.id}/${listener.id}`);
+        assert(['http', 'https', 'websocket', 'tcp'].includes(listener.protocol), `invalid listener protocol for ${project.id}/${component.id}/${listener.id}`);
 
         const occupiedKey = listenerKey(listener);
         const owner = `${project.id}/${component.id}/${listener.id}`;
@@ -101,10 +101,12 @@ export function validateCatalog(catalog: CatalogData): CatalogData {
       assert(['http', 'websocket'].includes(rule.match.protocol), `invalid ingress protocol for ${project.id}/${rule.id}`);
       const scheme = ingressScheme(rule);
       assert(['http', 'https'].includes(scheme), `invalid ingress scheme for ${project.id}/${rule.id}`);
-      if (rule.tls) {
+      if (rule.tls && (rule.tls.certificateFile || rule.tls.keyFile)) {
         assert(scheme === 'https', `TLS files require an HTTPS ingress for ${project.id}/${rule.id}`);
         assert(path.isAbsolute(rule.tls.certificateFile || ''), `TLS certificate file must be absolute for ${project.id}/${rule.id}`);
         assert(path.isAbsolute(rule.tls.keyFile || ''), `TLS key file must be absolute for ${project.id}/${rule.id}`);
+      } else {
+        delete rule.tls;
       }
 
       const componentRecord = components.get(rule.target?.component);

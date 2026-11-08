@@ -1,6 +1,6 @@
 {
   "name": "@vibedock/web",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "VibeDock Portal Frontend (React 19 + Vite + TypeScript)",
   "type": "module",

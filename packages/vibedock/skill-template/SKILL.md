@@ -29,15 +29,17 @@ node scripts/client.mjs check
 # 2. 自动检查项目 ID 并获取推荐空闲端口 ({{PORT_START}}–{{PORT_END}})
 node scripts/client.mjs alloc <id>
 
-# 3. 查看或开通项目专属数据库 (postgresql,mysql,mongodb,redis)
+# 3. 查看、开通或直接绑定项目专属数据库 (postgresql,mysql,mongodb,redis)
 node scripts/client.mjs db status
 node scripts/client.mjs db provision <id> --types postgresql,redis
+node scripts/client.mjs db bind <id> --postgresql "postgresql://user:pass@host:5432/db"
 
 # 4. 查看项目 PM2 进程状态与最近日志
 node scripts/client.mjs logs <id> --lines 60
 
-# 5. 发布或下线应用路由与门户卡片
+# 5. 发布应用、纳管已有内网/本机端口服务（adopt）或下线应用（unpublish）
 node scripts/client.mjs publish /path/to/publish.json
+node scripts/client.mjs adopt <id> --upstream http://127.0.0.1:8080 --name "已有服务名称"
 node scripts/client.mjs unpublish <id>
 ```
 

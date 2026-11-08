@@ -85,7 +85,7 @@ function main(): number {
   const cfg = loadServerConfig();
   const [op, ...rest] = process.argv.slice(2);
   if (!op) {
-    console.error('Usage: node scripts/client.mjs <check|alloc|logs|exec|upload|publish|unpublish|db> [args...]');
+    console.error('Usage: node scripts/client.mjs <check|alloc|logs|exec|upload|publish|adopt|unpublish|db> [args...]');
     return 1;
   }
 
@@ -163,6 +163,44 @@ function main(): number {
       stdinPayload = fs.readFileSync(manifestPath);
       break;
     }
+    case 'adopt': {
+      const id = rest[0];
+      const upIdx = rest.indexOf('--upstream');
+      const upstream = upIdx >= 0 && rest[upIdx + 1] ? rest[upIdx + 1] : rest[1];
+      if (!id || !upstream || upstream.startsWith('--')) {
+        throw new Error('Usage: node scripts/client.mjs adopt <project-id> --upstream <http://host:port> [--name <name>]');
+      }
+      const nameIdx = rest.indexOf('--name');
+      const descIdx = rest.indexOf('--description');
+      const ownerIdx = rest.indexOf('--owner');
+      const pathIdx = rest.indexOf('--path');
+      remoteCommand = publishCmd;
+      stdinPayload = Buffer.from(
+        JSON.stringify({
+          id,
+          name: nameIdx >= 0 && rest[nameIdx + 1] ? rest[nameIdx + 1] : id,
+          owner: ownerIdx >= 0 && rest[ownerIdx + 1] ? rest[ownerIdx + 1] : 'Infra',
+          description:
+            descIdx >= 0 && rest[descIdx + 1] ? rest[descIdx + 1] : `Adopted existing service (${upstream})`,
+          tags: ['存量纳管'],
+          components: [
+            {
+              id: 'upstream',
+              kind: 'external',
+              upstream,
+            },
+          ],
+          routes: [
+            {
+              component: 'upstream',
+              path: pathIdx >= 0 && rest[pathIdx + 1] ? rest[pathIdx + 1] : '/*',
+            },
+          ],
+        }),
+        'utf8',
+      );
+      break;
+    }
     case 'unpublish': {
       const projectId = rest[0];
       if (!projectId) throw new Error('Usage: node scripts/client.mjs unpublish <project-id>');
@@ -171,7 +209,7 @@ function main(): number {
       break;
     }
     case 'db': {
-      if (!rest.length) throw new Error('Usage: node scripts/client.mjs db <status|provision|get> [args...]');
+      if (!rest.length) throw new Error('Usage: node scripts/client.mjs db <status|provision|bind|get> [args...]');
       remoteCommand = `${dbCmd} ${rest.map(shellQuote).join(' ')}`;
       break;
     }

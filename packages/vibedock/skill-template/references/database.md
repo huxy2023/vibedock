@@ -11,6 +11,9 @@ node scripts/client.mjs db status
 # 2. 按需为项目开通专属数据库（支持 postgresql,mysql,mongodb,redis 或 all）
 node scripts/client.mjs db provision demo --types postgresql,redis
 
+# 2b. 或直接为项目绑定已有的外部数据库连接串（无需管理员密码）
+node scripts/client.mjs db bind demo --postgresql "postgresql://user:pass@host:5432/dbname" --redis "redis://:pass@host:6379/1"
+
 # 3. 导出 .env 格式并写入服务器项目私有 secrets 目录
 node scripts/client.mjs exec 'mkdir -p -m 700 {{APPS_DIR}}/demo/secrets'
 node scripts/client.mjs db get demo --format env | node scripts/client.mjs exec 'umask 077 && cat > {{APPS_DIR}}/demo/secrets/db.env'

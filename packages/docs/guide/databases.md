@@ -1,15 +1,30 @@
-# 一键数据库底座与隔离机制
+# 一键数据库底座与三档灵活接入
 
-## 1. 4 大共享数据库实例
+## 1. 三档灵活接入模式（Built-in Docker / 存量实例纳管 / 项目连接串直绑）
 
-VibeDock 通过 `packages/vibedock/docker/docker-compose.db.yml` 统一编排 4 大主流数据库，全部仅绑定宿主机回环地址 `127.0.0.1`，不向公网或局域网暴露裸端口：
+无论你的服务器是全新裸机，还是已经装有数据库或使用内网/云 RDS，VibeDock 均提供无侵入的三档接入方式：
 
-| 数据库引擎 | 容器名 | 宿主机监听 | 隔离策略 |
+1. **档位 1：零配置内置 Docker 容器（`vibedock db up`）**
+   通过 `packages/vibedock/docker/docker-compose.db.yml` 一键启动 4 大主流数据库，全部仅绑定宿主机回环地址 `127.0.0.1`，不向公网或局域网暴露裸端口。
+2. **档位 2：纳管宿主机已安装或远程/RDS 实例（`vibedock db register`）**
+   若服务器本机已装有 PostgreSQL/MySQL/MongoDB/Redis 或团队已有内网数据库，无需启动内置容器，直接注册管理员连接信息：
+   ```bash
+   sudo vibedock db register postgresql --url "postgresql://postgres:pass@127.0.0.1:5432/postgres"
+   sudo vibedock db register redis --host 127.0.0.1 --port 6379
+   ```
+   注册后，开发者执行 `db provision <project>` 会自动连接该存量实例为项目创建独立 Database、受限账号与 Redis ACL 前缀。
+3. **档位 3：项目级直接绑定现成连接串（`vibedock db bind`，无需管理员 root 密码）**
+   若某个项目需要直连现成的外部库（只有业务账号、没有 DBA 管理员密码），可直接绑定：
+   ```bash
+   node scripts/client.mjs db bind my-app --postgresql "postgresql://user:pass@rds.internal:5432/mydb" --redis "redis://:pass@127.0.0.1:6379/2"
+   ```
+
+| 数据库引擎 | 默认容器名 | 默认监听 | 按项目隔离策略 (`db provision`) |
 | :--- | :--- | :--- | :--- |
-| **PostgreSQL 16** | `vibedock-postgres` | `127.0.0.1:5432` | 每项目独立 Role + 独立 Database (`vibe_<id>`) |
-| **MySQL 8.0** | `vibedock-mysql` | `127.0.0.1:3306` | 每项目独立 User + 独立 Database (`vibe_<id>`) |
-| **MongoDB 8.0** | `vibedock-mongodb` | `127.0.0.1:27017` | 每项目独立 `readWrite` User + 独立 Database (`vibe_<id>`) |
-| **Redis 7.2** | `vibedock-redis` | `127.0.0.1:6379` | Redis 7 ACL 独立用户，限制仅可访问 `vibe_<id>:*` 键空间 |
+| **PostgreSQL 16** | `vibedock-postgres` | `127.0.0.1:5432` | 每项目独立 Role + 独立 Database (`proj_<id>`) |
+| **MySQL 8.0** | `vibedock-mysql` | `127.0.0.1:3306` | 每项目独立 User + 独立 Database (`proj_<id>`) |
+| **MongoDB 8.0** | `vibedock-mongodb` | `127.0.0.1:27017` | 每项目独立 `readWrite` User + 独立 Database (`proj_<id>`) |
+| **Redis 7.2** | `vibedock-redis` | `127.0.0.1:6379` | Redis 7 ACL 独立用户，限制仅可访问 `<id>:*` 键空间 |
 
 ---
 

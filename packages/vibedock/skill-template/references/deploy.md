@@ -87,8 +87,14 @@ node scripts/client.mjs logs demo --lines 80
 }
 ```
 
-执行发布或下线：
+执行发布、一键纳管存量服务或下线：
 ```bash
+# 常规发布
 node scripts/client.mjs publish /path/to/publish.json
+
+# 一键纳管宿主机或内网已运行的存量服务 (无需上传代码目录，直接分配子域名与门户卡片)
+node scripts/client.mjs adopt legacy-app --upstream http://127.0.0.1:8080 --name "存量业务系统"
+
+# 下线项目
 node scripts/client.mjs unpublish demo
 ```

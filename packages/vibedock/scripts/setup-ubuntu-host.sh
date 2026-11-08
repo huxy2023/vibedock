@@ -13,6 +13,7 @@ DEPLOY_HOME="${VIBEDOCK_HOME}/deploy"
 APPS_DIR="${VIBEDOCK_APPS_DIR:-${VIBEDOCK_HOME}/apps}"
 CADDY_SITES_DIR="${VIBEDOCK_CADDY_SITES_DIR:-${VIBEDOCK_HOME}/caddy/sites}"
 CADDY_MAIN_CONFIG="${VIBEDOCK_CADDY_CONFIG:-/etc/caddy/Caddyfile}"
+NGINX_SITES_DIR="${VIBEDOCK_NGINX_SITES_DIR:-${VIBEDOCK_HOME}/nginx/sites}"
 KEY_PUB="${VIBEDOCK_HOME}/keys/deploy_key.pub"
 CONFIG_FILE="${VIBEDOCK_HOME}/vibedock.config.json"
 
@@ -21,9 +22,21 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-echo "==> [1/5] 检查并安装 Ubuntu 系统基础组件 (SSHD / Caddy / rsync / zip / cron)"
+USE_NGINX=0
+if command -v systemctl &>/dev/null && systemctl is-active --quiet nginx && ! systemctl is-active --quiet caddy; then
+  USE_NGINX=1
+fi
+
+echo "==> [1/5] 检查并安装 Ubuntu 系统基础组件 (SSHD / 网关 / rsync / zip / cron)"
 NEED_APT=0
-for pkg_cmd in sshd:openssh-server caddy:caddy rsync:rsync zip:zip unzip:unzip curl:curl gpg:gnupg crontab:cron; do
+PKGS="curl ca-certificates gnupg openssh-server zip unzip rsync cron"
+CHECK_LIST="sshd:openssh-server rsync:rsync zip:zip unzip:unzip curl:curl gpg:gnupg crontab:cron"
+if [[ "${USE_NGINX}" -eq 0 ]]; then
+  PKGS="${PKGS} caddy"
+  CHECK_LIST="${CHECK_LIST} caddy:caddy"
+fi
+
+for pkg_cmd in ${CHECK_LIST}; do
   cmd_name="${pkg_cmd%%:*}"
   if ! command -v "${cmd_name}" &>/dev/null && [[ ! -x "/usr/sbin/${cmd_name}" ]]; then
     NEED_APT=1
@@ -34,7 +47,8 @@ done
 if [[ "${NEED_APT}" -eq 1 ]] && command -v apt-get &>/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq curl ca-certificates gnupg openssh-server caddy zip unzip rsync cron
+  # shellcheck disable=SC2086
+  apt-get install -y -qq ${PKGS}
 fi
 systemctl enable --now cron 2>/dev/null || service cron start 2>/dev/null || true
 
@@ -63,14 +77,16 @@ fi
 
 if command -v systemctl &>/dev/null; then
   systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
-  systemctl enable --now caddy 2>/dev/null || true
+  if [[ "${USE_NGINX}" -eq 0 ]]; then
+    systemctl enable --now caddy 2>/dev/null || true
+  fi
 fi
 
 echo "==> [2/5] 初始化统一资产目录 ${VIBEDOCK_HOME} 与受限部署账号 ${DEPLOY_USER}"
-mkdir -p "${VIBEDOCK_HOME}" "${DEPLOY_HOME}/.ssh" "${APPS_DIR}" "${CADDY_SITES_DIR}" "${VIBEDOCK_HOME}/certs" "${VIBEDOCK_HOME}/databases"
+mkdir -p "${VIBEDOCK_HOME}" "${DEPLOY_HOME}/.ssh" "${APPS_DIR}" "${CADDY_SITES_DIR}" "${NGINX_SITES_DIR}" "${VIBEDOCK_HOME}/certs" "${VIBEDOCK_HOME}/databases"
 mkdir -p -m 700 "${VIBEDOCK_HOME}/keys" "${VIBEDOCK_HOME}/secrets" "${VIBEDOCK_HOME}/secrets/databases"
 chmod 700 "${VIBEDOCK_HOME}/keys" "${VIBEDOCK_HOME}/secrets" "${VIBEDOCK_HOME}/secrets/databases"
-chmod 755 "${VIBEDOCK_HOME}" "${VIBEDOCK_HOME}/caddy" "${CADDY_SITES_DIR}" "${VIBEDOCK_HOME}/certs"
+chmod 755 "${VIBEDOCK_HOME}" "${VIBEDOCK_HOME}/caddy" "${CADDY_SITES_DIR}" "${VIBEDOCK_HOME}/nginx" "${NGINX_SITES_DIR}" "${VIBEDOCK_HOME}/certs"
 
 if [[ ! -f "${VIBEDOCK_HOME}/catalog.json" ]] && [[ -f "${ROOT_DIR}/data/catalog.json" ]]; then
   cp "${ROOT_DIR}/data/catalog.json" "${VIBEDOCK_HOME}/catalog.json"
@@ -120,11 +136,11 @@ set -euo pipefail
 export VIBEDOCK_HOME="${VIBEDOCK_HOME}"
 SUBCMD="\${1:-status}"
 case "\${SUBCMD}" in
-  status|get|provision|verify)
+  status|get|provision|bind|verify)
     exec "${NODE_BIN}" "${ROOT_DIR}/dist/cli/main.js" db "\$@"
     ;;
   *)
-    echo '{"ok":false,"error":"Subcommand not allowed for deploy user (allowed: status|get|provision|verify)"}' >&2
+    echo '{"ok":false,"error":"Subcommand not allowed for deploy user (allowed: status|get|provision|bind|verify)"}' >&2
     exit 1
     ;;
 esac
@@ -139,8 +155,31 @@ EOF
 chmod 440 /etc/sudoers.d/vibedock
 visudo -cf /etc/sudoers.d/vibedock
 
-echo "==> [5/5] 配置 Caddy 站点导入与门户反向代理"
-"${NODE_BIN}" -e "
+echo "==> [5/5] 配置网关站点导入与门户反向代理"
+if [[ "${USE_NGINX}" -eq 1 ]]; then
+  echo "    检测到本机已有 Nginx 正在运行，采用非侵入式 Nginx drop-in 模式 (${NGINX_SITES_DIR})..."
+  "${NODE_BIN}" -e "
+const fs = require('fs');
+let domain = '127.0.0.1.nip.io';
+let tlsLines = '';
+try {
+  const cfg = JSON.parse(fs.readFileSync('${CONFIG_FILE}', 'utf8'));
+  domain = cfg.primaryDomain || domain;
+  if (cfg.domainMode === 'custom' && cfg.tls && cfg.tls.certFile && cfg.tls.keyFile) {
+    tlsLines = '    listen 443 ssl;\n    ssl_certificate ' + cfg.tls.certFile + ';\n    ssl_certificate_key ' + cfg.tls.keyFile + ';\n';
+  }
+} catch {}
+const content = '# Managed by VibeDock (Portal Reverse Proxy)\nserver {\n    listen 80;\n' + tlsLines + '    server_name portal.' + domain + ' services.' + domain + ';\n    location / {\n        proxy_pass http://127.0.0.1:39090;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade \$http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto \$scheme;\n    }\n}\n';
+fs.writeFileSync('${NGINX_SITES_DIR}/00-vibedock-portal.conf', content, 'utf8');
+"
+  if [[ -d /etc/nginx/conf.d ]]; then
+    printf "# Managed by VibeDock\ninclude %s/*.conf;\n" "${NGINX_SITES_DIR}" > /etc/nginx/conf.d/vibedock.conf
+  fi
+  if command -v nginx &>/dev/null; then
+    nginx -t && nginx -s reload || true
+  fi
+else
+  "${NODE_BIN}" -e "
 const fs = require('fs');
 let hostLine = 'http://portal.127.0.0.1.nip.io';
 let tlsLine = '';
@@ -158,17 +197,18 @@ const content = '# Managed by VibeDock (Portal Reverse Proxy)\n' + hostLine + ' 
 fs.writeFileSync('${CADDY_SITES_DIR}/00-vibedock-portal.caddy', content, 'utf8');
 "
 
-if [[ -d "$(dirname "${CADDY_MAIN_CONFIG}")" ]]; then
-  IMPORT_LINE="import ${CADDY_SITES_DIR}/*.caddy"
-  if [[ -f "${CADDY_MAIN_CONFIG}" ]]; then
-    sed -i.bak '/data\/caddy\/sites\/\*\.caddy/d' "${CADDY_MAIN_CONFIG}" && rm -f "${CADDY_MAIN_CONFIG}.bak"
-  fi
-  if [[ ! -f "${CADDY_MAIN_CONFIG}" ]] || ! grep -Fq "${IMPORT_LINE}" "${CADDY_MAIN_CONFIG}"; then
-    printf "\n# VibeDock managed sites\n%s\n" "${IMPORT_LINE}" >> "${CADDY_MAIN_CONFIG}"
-  fi
-  if command -v caddy &>/dev/null; then
-    caddy reload --config "${CADDY_MAIN_CONFIG}" || true
+  if [[ -d "$(dirname "${CADDY_MAIN_CONFIG}")" ]]; then
+    IMPORT_LINE="import ${CADDY_SITES_DIR}/*.caddy"
+    if [[ -f "${CADDY_MAIN_CONFIG}" ]]; then
+      sed -i.bak '/data\/caddy\/sites\/\*\.caddy/d' "${CADDY_MAIN_CONFIG}" && rm -f "${CADDY_MAIN_CONFIG}.bak"
+    fi
+    if [[ ! -f "${CADDY_MAIN_CONFIG}" ]] || ! grep -Fq "${IMPORT_LINE}" "${CADDY_MAIN_CONFIG}"; then
+      printf "\n# VibeDock managed sites\n%s\n" "${IMPORT_LINE}" >> "${CADDY_MAIN_CONFIG}"
+    fi
+    if command -v caddy &>/dev/null; then
+      caddy reload --config "${CADDY_MAIN_CONFIG}" || true
+    fi
   fi
 fi
 
-echo "==> 完成！Ubuntu 生产底座、受限部署账号 ${DEPLOY_USER} 与 Caddy 路由入口已全部就绪。"
+echo "==> 完成！Ubuntu 生产底座、受限部署账号 ${DEPLOY_USER} 与网关路由入口已全部就绪。"

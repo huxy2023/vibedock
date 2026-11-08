@@ -1,6 +1,6 @@
 {
   "name": "@vibedock/docs",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "VibeDock Official Documentation & Product Landing Site (VitePress)",
   "type": "module",

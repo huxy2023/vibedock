@@ -18,6 +18,7 @@ export interface ProvisionedDbEntry {
   envKey: string;
   url: string;
   keyPrefix?: string;
+  bound?: boolean;
 }
 
 function randomSecret(len = 24): string {
@@ -44,10 +45,14 @@ function loadAdminCreds(cfg: VibeDockConfig): Record<string, any> {
   return JSON.parse(fs.readFileSync(adminFile, 'utf8'));
 }
 
+function isContainerRunning(container: string): boolean {
+  const inspect = spawnSync('docker', ['inspect', '-f', '{{.State.Running}}', container], { encoding: 'utf8', timeout: 3000 });
+  return inspect.status === 0 && inspect.stdout.trim() === 'true';
+}
+
 function runDockerExec(container: string, args: string[], inputText?: string) {
-  const inspect = spawnSync('docker', ['inspect', '-f', '{{.State.Running}}', container], { encoding: 'utf8', timeout: 5000 });
-  if (inspect.status !== 0 || inspect.stdout.trim() !== 'true') {
-    throw new Error(`Docker 数据库容器 ${container} 未启动，请先执行 "npx vibedock db up"`);
+  if (!isContainerRunning(container)) {
+    throw new Error(`Docker 数据库容器 ${container} 未启动，请先执行 "vibedock db up" 或使用 "vibedock db register" 接入已有数据库`);
   }
   const cmd = inputText !== undefined
     ? ['exec', '-i', container, ...args]
@@ -63,9 +68,52 @@ function runDockerExec(container: string, args: string[], inputText?: string) {
   return res.stdout;
 }
 
+function runClientCmd(
+  bin: string,
+  args: string[],
+  options: { input?: string; env?: NodeJS.ProcessEnv; dockerImage?: string } = {},
+): string {
+  const hasLocalBin = spawnSync('which', [bin], { encoding: 'utf8' }).status === 0;
+  if (hasLocalBin) {
+    const res = spawnSync(bin, args, {
+      input: options.input,
+      env: { ...process.env, ...(options.env || {}) },
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+    if (res.status !== 0) {
+      throw new Error((res.stderr || res.stdout || `${bin} command failed`).trim());
+    }
+    return res.stdout;
+  }
+  if (options.dockerImage) {
+    const envArgs = Object.entries(options.env || {}).flatMap(([k, v]) => (v !== undefined ? ['-e', `${k}=${v}`] : []));
+    const dArgs = ['run', '--rm', '--network', 'host', ...(options.input !== undefined ? ['-i'] : []), ...envArgs, options.dockerImage, bin, ...args];
+    const res = spawnSync('docker', dArgs, {
+      input: options.input,
+      encoding: 'utf8',
+      timeout: 20000,
+    });
+    if (res.status !== 0) {
+      throw new Error((res.stderr || res.stdout || `${bin} via docker failed`).trim());
+    }
+    return res.stdout;
+  }
+  throw new Error(`未检测到客户端工具 "${bin}"，请先安装对应客户端或使用 "vibedock db bind" 直接绑定现成连接串`);
+}
+
+function resolveTargetHost(cfg: VibeDockConfig, adminHost?: string, useDocker = true): string {
+  const h = String(adminHost || '127.0.0.1').trim();
+  if (!useDocker) return h;
+  return h === '127.0.0.1' || h === 'localhost' ? cfg.serverHost : h;
+}
+
 function provisionPostgresql(cfg: VibeDockConfig, admin: Record<string, any>, ident: string, password: string): ProvisionedDbEntry {
   const pgAdmin = admin.postgresql || {};
+  const adminHost = String(pgAdmin.host || '127.0.0.1').trim();
+  const port = Number(pgAdmin.port || 5432);
   const adminUser = pgAdmin.user || 'postgres';
+  const adminPassword = String(pgAdmin.password || '');
   const sql = `
 DO $do$
 BEGIN
@@ -80,10 +128,24 @@ SELECT 'CREATE DATABASE ${ident} OWNER ${ident}'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${ident}')\\gexec
 GRANT ALL PRIVILEGES ON DATABASE ${ident} TO ${ident};
 `;
-  runDockerExec('vibedock-postgres', ['psql', '-v', 'ON_ERROR_STOP=1', '-U', adminUser, '-d', 'postgres'], sql);
-  runDockerExec('vibedock-postgres', ['psql', '-v', 'ON_ERROR_STOP=1', '-U', adminUser, '-d', ident], `GRANT ALL ON SCHEMA public TO ${ident};\n`);
-  const port = Number(pgAdmin.port || 5432);
-  const host = cfg.serverHost;
+  const grantSql = `GRANT ALL ON SCHEMA public TO ${ident};\n`;
+  const useDocker = pgAdmin.mode !== 'external' && isContainerRunning('vibedock-postgres');
+  if (useDocker) {
+    runDockerExec('vibedock-postgres', ['psql', '-v', 'ON_ERROR_STOP=1', '-U', adminUser, '-d', 'postgres'], sql);
+    runDockerExec('vibedock-postgres', ['psql', '-v', 'ON_ERROR_STOP=1', '-U', adminUser, '-d', ident], grantSql);
+  } else {
+    runClientCmd('psql', ['-v', 'ON_ERROR_STOP=1', '-h', adminHost, '-p', String(port), '-U', adminUser, '-d', 'postgres'], {
+      input: sql,
+      env: { PGPASSWORD: adminPassword },
+      dockerImage: 'postgres:16-alpine',
+    });
+    runClientCmd('psql', ['-v', 'ON_ERROR_STOP=1', '-h', adminHost, '-p', String(port), '-U', adminUser, '-d', ident], {
+      input: grantSql,
+      env: { PGPASSWORD: adminPassword },
+      dockerImage: 'postgres:16-alpine',
+    });
+  }
+  const host = resolveTargetHost(cfg, adminHost, useDocker);
   return {
     type: 'postgresql',
     host,
@@ -98,6 +160,10 @@ GRANT ALL PRIVILEGES ON DATABASE ${ident} TO ${ident};
 
 function provisionMysql(cfg: VibeDockConfig, admin: Record<string, any>, ident: string, password: string): ProvisionedDbEntry {
   const myAdmin = admin.mysql || {};
+  const adminHost = String(myAdmin.host || '127.0.0.1').trim();
+  const port = Number(myAdmin.port || 3306);
+  const adminUser = myAdmin.user || 'root';
+  const adminPassword = String(myAdmin.password || '');
   const sql = `
 CREATE DATABASE IF NOT EXISTS \`${ident}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${ident}'@'%' IDENTIFIED BY '${password}';
@@ -105,9 +171,16 @@ ALTER USER '${ident}'@'%' IDENTIFIED BY '${password}';
 GRANT ALL PRIVILEGES ON \`${ident}\`.* TO '${ident}'@'%';
 FLUSH PRIVILEGES;
 `;
-  runDockerExec('vibedock-mysql', ['mysql', '-uroot', `-p${myAdmin.password || ''}`], sql);
-  const port = Number(myAdmin.port || 3306);
-  const host = cfg.serverHost;
+  const useDocker = myAdmin.mode !== 'external' && isContainerRunning('vibedock-mysql');
+  if (useDocker) {
+    runDockerExec('vibedock-mysql', ['mysql', `-u${adminUser}`, `-p${adminPassword}`], sql);
+  } else {
+    runClientCmd('mysql', ['-h', adminHost, '-P', String(port), `-u${adminUser}`, `-p${adminPassword}`], {
+      input: sql,
+      dockerImage: 'mysql:8.0',
+    });
+  }
+  const host = resolveTargetHost(cfg, adminHost, useDocker);
   return {
     type: 'mysql',
     host,
@@ -122,6 +195,10 @@ FLUSH PRIVILEGES;
 
 function provisionMongodb(cfg: VibeDockConfig, admin: Record<string, any>, ident: string, password: string): ProvisionedDbEntry {
   const mgAdmin = admin.mongodb || {};
+  const adminHost = String(mgAdmin.host || '127.0.0.1').trim();
+  const port = Number(mgAdmin.port || 27017);
+  const adminUser = mgAdmin.user || 'admin';
+  const adminPassword = String(mgAdmin.password || '');
   const js = `
 const targetDb = db.getSiblingDB(${JSON.stringify(ident)});
 const existing = targetDb.getUser(${JSON.stringify(ident)});
@@ -135,13 +212,21 @@ if (!existing) {
   targetDb.changeUserPassword(${JSON.stringify(ident)}, ${JSON.stringify(password)});
 }
 `;
-  runDockerExec(
-    'vibedock-mongodb',
-    ['mongosh', '--quiet', '-u', mgAdmin.user || 'admin', '-p', mgAdmin.password || '', '--authenticationDatabase', 'admin'],
-    js,
-  );
-  const port = Number(mgAdmin.port || 27017);
-  const host = cfg.serverHost;
+  const useDocker = mgAdmin.mode !== 'external' && isContainerRunning('vibedock-mongodb');
+  if (useDocker) {
+    runDockerExec(
+      'vibedock-mongodb',
+      ['mongosh', '--quiet', '-u', adminUser, '-p', adminPassword, '--authenticationDatabase', 'admin'],
+      js,
+    );
+  } else {
+    runClientCmd(
+      'mongosh',
+      ['--quiet', '--host', adminHost, '--port', String(port), '-u', adminUser, '-p', adminPassword, '--authenticationDatabase', 'admin'],
+      { input: js, dockerImage: 'mongo:8.0' },
+    );
+  }
+  const host = resolveTargetHost(cfg, adminHost, useDocker);
   return {
     type: 'mongodb',
     host,
@@ -156,13 +241,24 @@ if (!existing) {
 
 function provisionRedis(cfg: VibeDockConfig, admin: Record<string, any>, project: string, ident: string, password: string): ProvisionedDbEntry {
   const rdAdmin = admin.redis || {};
-  const prefix = `${project}:*`;
-  runDockerExec('vibedock-redis', [
-    'redis-cli', '--no-auth-warning', '-a', rdAdmin.password || '',
-    'ACL', 'SETUSER', ident, 'on', `>${password}`, `~${prefix}`, '+@all', '-@dangerous',
-  ]);
+  const adminHost = String(rdAdmin.host || '127.0.0.1').trim();
   const port = Number(rdAdmin.port || 6379);
-  const host = cfg.serverHost;
+  const adminPassword = String(rdAdmin.password || '');
+  const prefix = `${project}:*`;
+  const aclArgs = [
+    '--no-auth-warning',
+    ...(adminPassword ? ['-a', adminPassword] : []),
+    'ACL', 'SETUSER', ident, 'on', `>${password}`, `~${prefix}`, '+@all', '-@dangerous',
+  ];
+  const useDocker = rdAdmin.mode !== 'external' && isContainerRunning('vibedock-redis');
+  if (useDocker) {
+    runDockerExec('vibedock-redis', ['redis-cli', ...aclArgs]);
+  } else {
+    runClientCmd('redis-cli', ['-h', adminHost, '-p', String(port), ...aclArgs], {
+      dockerImage: 'redis:7.2-alpine',
+    });
+  }
+  const host = resolveTargetHost(cfg, adminHost, useDocker);
   return {
     type: 'redis',
     host,
@@ -176,16 +272,136 @@ function provisionRedis(cfg: VibeDockConfig, admin: Record<string, any>, project
   };
 }
 
+const ENV_KEYS: Record<string, string> = {
+  postgresql: 'POSTGRES_URL',
+  mysql: 'MYSQL_URL',
+  mongodb: 'MONGODB_URI',
+  redis: 'REDIS_URL',
+};
+
+const DEFAULT_PORTS: Record<string, number> = {
+  postgresql: 5432,
+  mysql: 3306,
+  mongodb: 27017,
+  redis: 6379,
+};
+
 export function getDbStatus(cfg: VibeDockConfig) {
   const projectsDir = path.join(cfg.paths.dbSecretsDir, 'projects');
   const projects = fs.existsSync(projectsDir)
     ? fs.readdirSync(projectsDir).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)).sort()
     : [];
+  const adminFile = path.join(cfg.paths.dbSecretsDir, 'admin.json');
+  const admin = fs.existsSync(adminFile) ? JSON.parse(fs.readFileSync(adminFile, 'utf8')) : {};
+  const instances: Record<string, { mode: string; host: string; port: number }> = {};
+  for (const engine of SUPPORTED_TYPES) {
+    const info = admin[engine] || {};
+    instances[engine] = {
+      mode: info.mode || 'docker',
+      host: info.host || '127.0.0.1',
+      port: Number(info.port || DEFAULT_PORTS[engine]),
+    };
+  }
   return {
     host: cfg.serverHost,
     mode: cfg.databases.mode,
+    instances,
     projects,
   };
+}
+
+export function registerDbInstance(
+  cfg: VibeDockConfig,
+  rawEngine: string,
+  options: { mode?: 'docker' | 'external'; host?: string; port?: number; user?: string; password?: string; url?: string },
+) {
+  const engine = String(rawEngine || '').trim().toLowerCase();
+  const normalizedEngine = engine === 'postgres' || engine === 'pg' ? 'postgresql' : engine;
+  if (!SUPPORTED_TYPES.has(normalizedEngine)) {
+    throw new Error(`Unsupported database type: ${rawEngine} (use postgresql, mysql, mongodb, or redis)`);
+  }
+  fs.mkdirSync(cfg.paths.dbSecretsDir, { recursive: true, mode: 0o700 });
+  const adminFile = path.join(cfg.paths.dbSecretsDir, 'admin.json');
+  const admin = fs.existsSync(adminFile) ? JSON.parse(fs.readFileSync(adminFile, 'utf8')) : {};
+  const current = admin[normalizedEngine] || {};
+
+  let host = options.host || current.host || '127.0.0.1';
+  let port = Number(options.port || current.port || DEFAULT_PORTS[normalizedEngine]);
+  let user = options.user ?? current.user ?? (normalizedEngine === 'postgresql' ? 'postgres' : normalizedEngine === 'mysql' ? 'root' : 'admin');
+  let password = options.password ?? current.password ?? '';
+
+  if (options.url) {
+    const parsed = new URL(options.url);
+    host = parsed.hostname || host;
+    port = Number(parsed.port || port);
+    if (parsed.username) user = decodeURIComponent(parsed.username);
+    if (parsed.password) password = decodeURIComponent(parsed.password);
+  }
+
+  const mode = options.mode || 'external';
+  admin[normalizedEngine] = {
+    mode,
+    host,
+    port,
+    ...(normalizedEngine === 'redis' ? {} : { user }),
+    password,
+  };
+  writeFileAtomic(adminFile, `${JSON.stringify(admin, null, 2)}\n`, 0o600);
+  return {
+    engine: normalizedEngine,
+    mode,
+    host,
+    port,
+    user: normalizedEngine === 'redis' ? undefined : user,
+  };
+}
+
+export function bindProjectDbs(
+  cfg: VibeDockConfig,
+  rawProject: string,
+  bindings: Record<string, string>,
+) {
+  const project = normalizeProject(rawProject);
+  const entries = Object.entries(bindings).filter(([, v]) => Boolean(v && String(v).trim()));
+  if (!entries.length) {
+    throw new Error('Specify at least one database connection URL to bind');
+  }
+  const projectsDir = path.join(cfg.paths.dbSecretsDir, 'projects');
+  fs.mkdirSync(projectsDir, { recursive: true, mode: 0o700 });
+  const lockFile = path.join(cfg.paths.dbSecretsDir, 'provision.lock');
+  return withFileLock(lockFile, () => {
+    const projFile = path.join(projectsDir, `${project}.json`);
+    const record: { project: string; updatedAt: string; databases: Record<string, ProvisionedDbEntry> } = fs.existsSync(projFile)
+      ? JSON.parse(fs.readFileSync(projFile, 'utf8'))
+      : { project, updatedAt: '', databases: {} };
+
+    for (const [rawKey, rawUrl] of entries) {
+      const k = rawKey.trim().toLowerCase();
+      const engine = k === 'postgres' || k === 'pg' ? 'postgresql' : k;
+      if (!SUPPORTED_TYPES.has(engine)) {
+        throw new Error(`Unsupported database type: ${rawKey}`);
+      }
+      const urlStr = String(rawUrl).trim();
+      const parsed = new URL(urlStr);
+      const dbName = parsed.pathname.replace(/^\/+/, '') || (engine === 'redis' ? '0' : project);
+      record.databases[engine] = {
+        type: engine,
+        host: parsed.hostname || '127.0.0.1',
+        port: Number(parsed.port || DEFAULT_PORTS[engine]),
+        database: dbName,
+        username: decodeURIComponent(parsed.username || ''),
+        password: decodeURIComponent(parsed.password || ''),
+        envKey: ENV_KEYS[engine],
+        url: urlStr,
+        bound: true,
+        ...(engine === 'redis' ? { keyPrefix: `${project}:*` } : {}),
+      };
+    }
+
+    record.updatedAt = new Date().toISOString();
+    writeFileAtomic(projFile, `${JSON.stringify(record, null, 2)}\n`, 0o600);
+    return record;
+  });
 }
 
 export function getProjectDbRecord(cfg: VibeDockConfig, rawProject: string) {
@@ -218,8 +434,13 @@ export function provisionProjectDbs(cfg: VibeDockConfig, rawProject: string, raw
 
     const ident = safeIdentifier(project);
     for (const t of types) {
-      const existingPwd = record.databases?.[t]?.password;
-      const password = existingPwd || randomSecret(24);
+      const existing = record.databases?.[t];
+      if (existing?.bound) {
+        continue;
+      }
+      const existingPwd = existing?.password;
+      const password =
+        existingPwd && /^[A-Za-z0-9_-]{8,64}$/.test(existingPwd) ? existingPwd : randomSecret(24);
       if (t === 'postgresql') record.databases[t] = provisionPostgresql(cfg, admin, ident, password);
       else if (t === 'mysql') record.databases[t] = provisionMysql(cfg, admin, ident, password);
       else if (t === 'mongodb') record.databases[t] = provisionMongodb(cfg, admin, ident, password);

@@ -12,8 +12,9 @@ export const DeployView: React.FC<DeployViewProps> = ({ catalog }) => {
   const [appName, setAppName] = useState('团队新工具');
   const [category] = useState('工具');
   const [owner] = useState('Team');
-  const [kind, setKind] = useState<'fullstack' | 'service' | 'static'>('fullstack');
+  const [kind, setKind] = useState<'fullstack' | 'service' | 'static' | 'external'>('fullstack');
   const [runtime, setRuntime] = useState<'node' | 'python' | 'go'>('node');
+  const [upstreamUrl, setUpstreamUrl] = useState('http://127.0.0.1:8080');
   const [selectedDbs, setSelectedDbs] = useState<string[]>([]);
   const [copiedKey, setCopiedKey] = useState('');
 
@@ -61,6 +62,8 @@ export const DeployView: React.FC<DeployViewProps> = ({ catalog }) => {
         ]
       : kind === 'service'
       ? [{ id: 'api', kind: 'service', runtime, port: nextPort, command: runtimeDefaultCmd }]
+      : kind === 'external'
+      ? [{ id: 'upstream', kind: 'external', upstream: upstreamUrl || 'http://127.0.0.1:8080' }]
       : [{ id: 'web', kind: 'static', root: 'web', routing: 'spa' }];
 
   const routes =
@@ -69,7 +72,13 @@ export const DeployView: React.FC<DeployViewProps> = ({ catalog }) => {
           { component: 'api', host: 'main', path: '/api/*' },
           { component: 'web', host: 'main', path: '/*' },
         ]
-      : [{ component: kind === 'service' ? 'api' : 'web', host: 'main', path: '/*' }];
+      : [
+          {
+            component: kind === 'service' ? 'api' : kind === 'external' ? 'upstream' : 'web',
+            host: 'main',
+            path: '/*',
+          },
+        ];
 
   const manifestPreview = JSON.stringify(
     {
@@ -92,24 +101,30 @@ export const DeployView: React.FC<DeployViewProps> = ({ catalog }) => {
       ? `\nnode ~/.claude/skills/vibedock-deploy/scripts/client.mjs db provision ${slug} --types ${selectedDbs.join(',')}`
       : '';
 
-  const aiPromptPreview = [
-    `请使用 vibedock-deploy Skill 将当前项目部署到团队服务器：`,
-    `- 项目 ID: ${slug}`,
-    `- 项目名称: ${appName || '团队新工具'}`,
-    `- 分类: ${category || '工具'} / 负责人: ${owner || 'Team'}`,
-    `- 部署形态: ${
-      kind === 'fullstack'
-        ? `前后端一体 (web 静态前端 /* + api 后端服务 /api/*, Runtime: ${runtime})`
-        : kind === 'service'
-        ? `后端/全栈常驻服务 (${runtime})`
-        : '纯静态前端站点'
-    }`,
-    selectedDbs.length > 0
-      ? `- 需要自动开通并注入环境变量的数据库: ${selectedDbs.join(', ')}`
-      : `- 数据库需求: 无需共享数据库`,
-    `请先执行以下命令分配固定端口${selectedDbs.length > 0 ? '与数据库' : ''}：\n${allocCmd}${dbProvisionCmd}`,
-    `然后上传产物并调用 publish 发布上线。`,
-  ].join('\n');
+  const aiPromptPreview =
+    kind === 'external'
+      ? [
+          `请使用 vibedock-deploy Skill 一键纳管已有存量服务并挂载子域名与门户卡片：`,
+          `node ~/.claude/skills/vibedock-deploy/scripts/client.mjs adopt ${slug} --upstream "${upstreamUrl || 'http://127.0.0.1:8080'}" --name "${appName || '团队新工具'}" --owner "${owner || 'Team'}"`,
+        ].join('\n')
+      : [
+          `请使用 vibedock-deploy Skill 将当前项目部署到团队服务器：`,
+          `- 项目 ID: ${slug}`,
+          `- 项目名称: ${appName || '团队新工具'}`,
+          `- 分类: ${category || '工具'} / 负责人: ${owner || 'Team'}`,
+          `- 部署形态: ${
+            kind === 'fullstack'
+              ? `前后端一体 (web 静态前端 /* + api 后端服务 /api/*, Runtime: ${runtime})`
+              : kind === 'service'
+              ? `后端/全栈常驻服务 (${runtime})`
+              : '纯静态前端站点'
+          }`,
+          selectedDbs.length > 0
+            ? `- 需要自动开通并注入环境变量的数据库: ${selectedDbs.join(', ')}`
+            : `- 数据库需求: 无需共享数据库`,
+          `请先执行以下命令分配固定端口${selectedDbs.length > 0 ? '与数据库' : ''}：\n${allocCmd}${dbProvisionCmd}`,
+          `然后上传产物并调用 publish 发布上线。`,
+        ].join('\n');
 
   return (
     <section className="space-y-6">
@@ -236,25 +251,40 @@ export const DeployView: React.FC<DeployViewProps> = ({ catalog }) => {
               <label className="text-xs font-medium text-zinc-700">部署架构形态</label>
               <Select
                 value={kind}
-                onChange={(e) => setKind(e.target.value as 'fullstack' | 'service' | 'static')}
+                onChange={(e) =>
+                  setKind(e.target.value as 'fullstack' | 'service' | 'static' | 'external')
+                }
               >
                 <option value="fullstack">前后端一体 (静态前端 /* + 后端服务 /api/*)</option>
                 <option value="service">纯后端/全栈单进程服务 (PM2 守护 + 反代)</option>
-                <option value="static">纯静态前端站点 (Caddy 直接托管)</option>
+                <option value="static">纯静态前端站点 (网关直接托管)</option>
+                <option value="external">存量服务纳管 (本机/内网已有端口一键挂入网关)</option>
               </Select>
             </div>
-            {kind !== 'static' && (
+            {kind === 'external' ? (
               <div className="space-y-1">
-                <label className="text-xs font-medium text-zinc-700">服务端语言栈 (Runtime)</label>
-                <Select
-                  value={runtime}
-                  onChange={(e) => setRuntime(e.target.value as 'node' | 'python' | 'go')}
-                >
-                  <option value="node">Node.js / TypeScript (Hono / Express / Next)</option>
-                  <option value="python">Python (FastAPI / Uvicorn / Flask)</option>
-                  <option value="go">Go / 编译型二进制</option>
-                </Select>
+                <label className="text-xs font-medium text-zinc-700">存量服务上游地址 (Upstream)</label>
+                <Input
+                  type="text"
+                  value={upstreamUrl}
+                  onChange={(e) => setUpstreamUrl(e.target.value)}
+                  placeholder="http://127.0.0.1:8080"
+                />
               </div>
+            ) : (
+              kind !== 'static' && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-zinc-700">服务端语言栈 (Runtime)</label>
+                  <Select
+                    value={runtime}
+                    onChange={(e) => setRuntime(e.target.value as 'node' | 'python' | 'go')}
+                  >
+                    <option value="node">Node.js / TypeScript (Hono / Express / Next)</option>
+                    <option value="python">Python (FastAPI / Uvicorn / Flask)</option>
+                    <option value="go">Go / 编译型二进制</option>
+                  </Select>
+                </div>
+              )
             )}
           </div>
 

@@ -4,7 +4,9 @@
 
 - **操作系统**：Ubuntu 22.04 / 24.04 LTS（生产服务端）或 macOS / Linux（本地开发）
 - **Node.js**：`>= 22.5.0`（使用内置 `node:sqlite`，零原生 C++ 编译依赖）
-- **生产底座组件**（由 `sudo vibedock setup` 一键自动安装）：`Caddy`、`PM2`、`uv`、`rsync`、`zip`、`cron`、`openssh-server`
+- **生产底座组件**（由 `sudo vibedock setup` 一键自动检测与安装）：
+  - **智能网关适配**：若服务器已运行 `Nginx`，自动切换为非侵入式 **Nginx Drop-in 模式**（`/var/lib/vibedock/nginx/sites/*.conf`），不强装 Caddy、不抢占 80/443 端口；若为干净机器则自动安装配置 `Caddy`。
+  - **进程与运行时**：`PM2`、`uv`、`rsync`、`zip`、`cron`、`openssh-server`
 
 ---
 

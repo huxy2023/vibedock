@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildCaddyConfig } from './caddy.js';
+import { buildCaddyConfig, buildNginxConfig } from './caddy.js';
 import { isPortListeningByDeployUser, withFileLock, writeFileAtomic } from './utils.js';
 import type {
   CatalogComponent,
@@ -32,6 +32,15 @@ function normalizeSlug(raw: string, prefix: string): string {
 
 function loadCatalog(cfg: VibeDockConfig): { catalogPath: string; catalog: CatalogData } {
   const catalogPath = path.join(cfg.paths.dataDir, 'catalog.json');
+  if (!fs.existsSync(catalogPath)) {
+    return {
+      catalogPath,
+      catalog: {
+        environment: { name: `${cfg.brandName} Server` } as any,
+        projects: [],
+      },
+    };
+  }
   const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as CatalogData;
   return { catalogPath, catalog };
 }
@@ -112,7 +121,10 @@ export function publishApp(
     if (!description || description.length > 240) throw new Error('description is required (<= 240 chars)');
 
     const appDir = path.resolve(cfg.paths.appsDir, slug, 'current');
-    if (!fs.existsSync(appDir)) {
+    const needsLocalAppDir = (manifest.components || []).some(
+      (comp) => comp.kind === 'static' || (comp.kind === 'service' && !comp.upstream),
+    );
+    if (needsLocalAppDir && !fs.existsSync(appDir)) {
       throw new Error(`App directory does not exist: ${appDir}`);
     }
 
@@ -123,7 +135,7 @@ export function publishApp(
     const seenPorts = new Set<number>();
 
     for (const comp of manifest.components || []) {
-      const cid = String(comp.id || '').trim().toLowerCase();
+      const cid = String(comp.id || comp.name || 'upstream').trim().toLowerCase();
       if (!COMP_ID_RE.test(cid) || seenCompIds.has(cid)) {
         throw new Error(`Invalid or duplicate component id: ${cid}`);
       }
@@ -150,6 +162,40 @@ export function publishApp(
           runtime: routing === 'spa' ? 'Caddy Static (SPA)' : 'Caddy Static',
           staticRoot,
           listeners: [],
+        });
+      } else if (comp.kind === 'external' || (comp.kind === 'service' && comp.upstream)) {
+        const rawUpstream = String(comp.upstream || '').trim();
+        if (!rawUpstream) {
+          throw new Error(`External component "${cid}" requires an upstream address (e.g. "http://127.0.0.1:8080")`);
+        }
+        const parsed = new URL(rawUpstream.includes('://') ? rawUpstream : `http://${rawUpstream}`);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error(`Unsupported upstream protocol in "${rawUpstream}" (use http:// or https://)`);
+        }
+        const isHttpsUpstream = parsed.protocol === 'https:';
+        const host = parsed.hostname === 'localhost' ? '127.0.0.1' : parsed.hostname;
+        const port = Number(parsed.port || (isHttpsUpstream ? 443 : 80));
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          throw new Error(`Invalid upstream port in "${rawUpstream}"`);
+        }
+        const isLocal = host === '127.0.0.1' || host === '::1';
+        catalogComponents.push({
+          id: cid,
+          name: cid,
+          role: '已纳管存量服务',
+          type: 'service',
+          runtime: 'External / Adopted Service',
+          processManager: `Adopted (${cfg.deployUser})`,
+          listeners: [
+            {
+              id: 'http',
+              name: isHttpsUpstream ? 'HTTPS' : 'HTTP',
+              protocol: isHttpsUpstream ? 'https' : 'http',
+              scope: isLocal ? 'local' : 'remote',
+              host,
+              port,
+            },
+          ],
         });
       } else if (comp.kind === 'service') {
         const port = Number(comp.port);
@@ -185,7 +231,7 @@ export function publishApp(
           ],
         });
       } else {
-        throw new Error(`Unsupported component kind: ${(comp as any).kind} (use "static" or "service")`);
+        throw new Error(`Unsupported component kind: ${(comp as any).kind} (use "static", "service", or "external")`);
       }
     }
 
@@ -193,7 +239,8 @@ export function publishApp(
       throw new Error('components must contain at least 1 component');
     }
 
-    const scheme = cfg.domainMode === 'nip' ? 'http' : 'https';
+    const gateway = cfg.gateway || 'caddy';
+    const isNginx = gateway === 'nginx';
     const customTls =
       cfg.domainMode === 'custom' &&
       cfg.tls?.certFile &&
@@ -202,7 +249,12 @@ export function publishApp(
       /^\/[A-Za-z0-9._/-]+$/.test(cfg.tls.keyFile)
         ? { certificateFile: cfg.tls.certFile, keyFile: cfg.tls.keyFile }
         : undefined;
-    const ingressRules: IngressRule[] = (manifest.routes || []).map((route, idx) => {
+    const scheme = cfg.domainMode === 'nip' || (isNginx && !customTls) ? 'http' : 'https';
+    const rawRoutes =
+      Array.isArray(manifest.routes) && manifest.routes.length > 0
+        ? manifest.routes
+        : [{ component: catalogComponents[0].id, path: '/*' }];
+    const ingressRules: IngressRule[] = rawRoutes.map((route, idx) => {
       const targetComp = catalogComponents.find((c) => c.id === route.component);
       if (!targetComp) throw new Error(`Route references unknown component: ${route.component}`);
       const sub = route.subdomain ? String(route.subdomain).trim().toLowerCase() : '';
@@ -238,7 +290,11 @@ export function publishApp(
       throw new Error('routes must contain at least 1 route');
     }
 
-    const siteFile = path.join(cfg.paths.caddySitesDir, `${projectId}.caddy`);
+    const sitesDir = isNginx
+      ? cfg.paths.nginxSitesDir || path.join(cfg.paths.dataDir, 'nginx/sites')
+      : cfg.paths.caddySitesDir;
+    fs.mkdirSync(sitesDir, { recursive: true, mode: 0o755 });
+    const siteFile = path.join(sitesDir, `${projectId}.${isNginx ? 'conf' : 'caddy'}`);
     const projectEntry: CatalogProject = {
       id: projectId,
       name,
@@ -265,10 +321,10 @@ export function publishApp(
       }
     };
 
-    const caddyText = `# Managed by VibeDock (${projectId})\n${buildCaddyConfig(projectEntry)}\n`;
-    writeFileAtomic(siteFile, caddyText, 0o644);
+    const siteText = `# Managed by VibeDock (${projectId})\n${isNginx ? buildNginxConfig(projectEntry) : buildCaddyConfig(projectEntry)}\n`;
+    writeFileAtomic(siteFile, siteText, 0o644);
 
-    if (!options.skipCaddyReload && fs.existsSync(cfg.paths.caddyConfig)) {
+    if (!options.skipCaddyReload && gateway === 'caddy' && fs.existsSync(cfg.paths.caddyConfig)) {
       const val = spawnSync(cfg.paths.caddyBin, ['validate', '--config', cfg.paths.caddyConfig, '--adapter', 'caddyfile'], {
         encoding: 'utf8',
         timeout: 10000,
@@ -284,6 +340,18 @@ export function publishApp(
       if (rel.status !== 0) {
         restorePreviousSite();
         throw new Error(`Caddy reload failed: ${(rel.stderr || rel.stdout).trim()}`);
+      }
+    } else if (!options.skipCaddyReload && gateway === 'nginx' && fs.existsSync(cfg.paths.nginxConfig || '/etc/nginx/nginx.conf')) {
+      const nginxBin = cfg.paths.nginxBin || 'nginx';
+      const val = spawnSync(nginxBin, ['-t'], { encoding: 'utf8', timeout: 10000 });
+      if (val.status !== 0) {
+        restorePreviousSite();
+        throw new Error(`Nginx validate failed: ${(val.stderr || val.stdout).trim()}`);
+      }
+      const rel = spawnSync(nginxBin, ['-s', 'reload'], { encoding: 'utf8', timeout: 10000 });
+      if (rel.status !== 0) {
+        restorePreviousSite();
+        throw new Error(`Nginx reload failed: ${(rel.stderr || rel.stdout).trim()}`);
       }
     }
 
@@ -309,11 +377,22 @@ export function unpublishApp(cfg: VibeDockConfig, rawId: string, options: { skip
       throw new Error(`Project ${projectId} not found in catalog`);
     }
 
-    const siteFile = path.join(cfg.paths.caddySitesDir, `${projectId}.caddy`);
-    fs.rmSync(siteFile, { force: true });
+    const gateway = cfg.gateway || 'caddy';
+    const caddySiteFile = path.join(cfg.paths.caddySitesDir, `${projectId}.caddy`);
+    const nginxSiteFile = path.join(
+      cfg.paths.nginxSitesDir || path.join(cfg.paths.dataDir, 'nginx/sites'),
+      `${projectId}.conf`,
+    );
+    fs.rmSync(caddySiteFile, { force: true });
+    fs.rmSync(nginxSiteFile, { force: true });
 
-    if (!options.skipCaddyReload && fs.existsSync(cfg.paths.caddyConfig)) {
+    if (!options.skipCaddyReload && gateway === 'caddy' && fs.existsSync(cfg.paths.caddyConfig)) {
       spawnSync(cfg.paths.caddyBin, ['reload', '--config', cfg.paths.caddyConfig, '--adapter', 'caddyfile'], {
+        encoding: 'utf8',
+        timeout: 10000,
+      });
+    } else if (!options.skipCaddyReload && gateway === 'nginx' && fs.existsSync(cfg.paths.nginxConfig || '/etc/nginx/nginx.conf')) {
+      spawnSync(cfg.paths.nginxBin || 'nginx', ['-s', 'reload'], {
         encoding: 'utf8',
         timeout: 10000,
       });

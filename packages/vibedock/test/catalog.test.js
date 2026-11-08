@@ -9,6 +9,10 @@ import {
   redactSnapshotForPublic,
   validateCatalog,
 } from '../dist/services/catalog.js';
+import { buildNginxConfig } from '../dist/deploy/caddy.js';
+import { bindProjectDbs, formatDbEnv, provisionProjectDbs, registerDbInstance } from '../dist/deploy/databases.js';
+import { publishApp } from '../dist/deploy/publish.js';
+import { loadVibeDockConfig } from '../dist/config.js';
 
 function splitProjectCatalog() {
   return {
@@ -193,4 +197,88 @@ test('computes DX port pool and redacts sensitive paths for public snapshot', as
   assert.equal(redacted.projects[0].commands.length, 0);
   assert.deepEqual(redacted.projects[0].ingressRules[0].tls, { managed: true });
   assert.equal(redacted.projects[0].components[0].staticRoot, '[受保护静态站点目录]');
+});
+
+test('generates Nginx drop-in server blocks for static and upstream services', () => {
+  const project = remoteHttpsCatalog().projects[0];
+  const nginxConf = buildNginxConfig(project);
+  assert.match(nginxConf, /server \{/);
+  assert.match(nginxConf, /listen 443 ssl;/);
+  assert.match(nginxConf, /ssl_certificate \/srv\/certs\/api\/fullchain\.pem;/);
+  assert.match(nginxConf, /server_name api\.vibe\.example\.com;/);
+  assert.match(nginxConf, /proxy_pass http:\/\/172\.22\.4\.192:80;/);
+});
+
+test('supports adopting existing upstream services (including https://) and Nginx gateway mode without local appDir', (context) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibedock-byoi-'));
+  context.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cfgFile = path.join(dir, 'vibedock.config.json');
+  fs.writeFileSync(
+    cfgFile,
+    JSON.stringify({
+      serverHost: '192.168.1.10',
+      primaryDomain: 'vd.example.com',
+      domainMode: 'letsencrypt',
+      gateway: 'nginx',
+      paths: {
+        dataDir: dir,
+        appsDir: path.join(dir, 'apps'),
+        caddySitesDir: path.join(dir, 'caddy/sites'),
+        nginxSitesDir: path.join(dir, 'nginx/sites'),
+        nginxConfig: path.join(dir, 'nonexistent-nginx.conf'),
+        dbSecretsDir: path.join(dir, 'secrets/databases'),
+      },
+    }),
+  );
+  const cfg = loadVibeDockConfig(cfgFile);
+  const res = publishApp(cfg, {
+    id: 'grafana',
+    name: 'Grafana 监控看板',
+    owner: 'SRE',
+    description: '纳管现有 HTTPS Grafana 监控面板',
+    components: [{ id: 'upstream', kind: 'external', upstream: 'https://10.0.0.20:8443' }],
+  });
+  assert.equal(res.projectId, 'team-grafana');
+  assert.deepEqual(res.urls, ['http://team-grafana.vd.example.com']);
+  const nginxSite = fs.readFileSync(path.join(dir, 'nginx/sites/team-grafana.conf'), 'utf8');
+  assert.match(nginxSite, /listen 80;/);
+  assert.match(nginxSite, /server_name team-grafana\.vd\.example\.com;/);
+  assert.match(nginxSite, /proxy_pass https:\/\/10\.0\.0\.20:8443;/);
+});
+
+test('supports registering external DB instances and binding project connection URLs directly', (context) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibedock-db-bind-'));
+  context.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cfgFile = path.join(dir, 'vibedock.config.json');
+  fs.writeFileSync(
+    cfgFile,
+    JSON.stringify({
+      paths: {
+        dataDir: dir,
+        dbSecretsDir: path.join(dir, 'secrets/databases'),
+      },
+    }),
+  );
+  const cfg = loadVibeDockConfig(cfgFile);
+  const reg = registerDbInstance(cfg, 'postgresql', {
+    url: 'postgresql://dbadmin:secret123@10.0.0.50:5432/postgres',
+  });
+  assert.equal(reg.host, '10.0.0.50');
+  assert.equal(reg.port, 5432);
+  assert.equal(reg.user, 'dbadmin');
+  assert.equal(reg.mode, 'external');
+
+  const record = bindProjectDbs(cfg, 'analytics', {
+    postgresql: "postgresql://app_user:p'inject@10.0.0.50:5432/analytics_db",
+    redis: 'redis://:redis_pass@10.0.0.51:6379/2',
+  });
+  assert.equal(record.databases.postgresql.database, 'analytics_db');
+  assert.equal(record.databases.postgresql.username, 'app_user');
+  assert.equal(record.databases.postgresql.bound, true);
+  assert.equal(record.databases.redis.keyPrefix, 'analytics:*');
+  const provisioned = provisionProjectDbs(cfg, 'analytics', ['postgresql', 'redis']);
+  assert.equal(provisioned.databases.postgresql.url, "postgresql://app_user:p'inject@10.0.0.50:5432/analytics_db");
+  const envOut = formatDbEnv(record);
+  assert.match(envOut, /POSTGRES_URL="postgresql:\/\/app_user:p'inject@10\.0\.0\.50:5432\/analytics_db"/);
+  assert.match(envOut, /REDIS_URL="redis:\/\/:redis_pass@10\.0\.0\.51:6379\/2"/);
 });

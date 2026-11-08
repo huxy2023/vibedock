@@ -26,6 +26,7 @@ export interface VibeDockConfig {
   deployUser: string;
   appPrefix: string;
   domainMode: 'nip' | 'letsencrypt' | 'custom';
+  gateway?: 'caddy' | 'nginx' | 'none';
   primaryDomain: string;
   backupDomain: string;
   portalUrl: string;
@@ -43,11 +44,14 @@ export interface VibeDockConfig {
     caddyBin: string;
     caddyConfig: string;
     caddySitesDir: string;
+    nginxBin?: string;
+    nginxConfig?: string;
+    nginxSitesDir?: string;
     dbSecretsDir: string;
     skillZipFile: string;
   };
   databases: {
-    mode: 'docker';
+    mode: 'docker' | 'external' | 'mixed';
     composeFile: string;
     enabled: string[];
   };
@@ -63,7 +67,7 @@ export interface VibeDockConfig {
 export interface CatalogListener {
   id: string;
   name?: string;
-  protocol: 'http' | 'websocket' | 'tcp';
+  protocol: 'http' | 'https' | 'websocket' | 'tcp';
   scope?: 'local' | 'remote';
   host: string;
   port: number;
@@ -203,12 +207,14 @@ export interface ActionDefinition extends ActionMetadata {
 }
 
 export interface PublishComponentSpec {
-  id: string;
-  kind: 'static' | 'service';
-  runtime?: 'node' | 'python' | 'go' | string;
+  id?: string;
+  name?: string;
+  kind: 'static' | 'service' | 'external';
+  runtime?: 'node' | 'python' | 'go' | 'external' | string;
   root?: string;
   routing?: 'spa' | 'mpa';
   port?: number;
+  upstream?: string;
   entry?: string;
 }
 
@@ -229,5 +235,5 @@ export interface PublishManifest {
   description: string;
   tags?: string[];
   components: PublishComponentSpec[];
-  routes: PublishRouteSpec[];
+  routes?: PublishRouteSpec[];
 }

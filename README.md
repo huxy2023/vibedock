@@ -12,12 +12,16 @@
    - 团队成员装好 Skill 后，无需记忆服务器 IP、SSH 密钥或 Caddy 语法，直接对 AI 编程助手说句话即可完成端口分配、构建产物上传、PM2 守护与独立子域名路由。
 2. **公网与内网泛域名 HTTPS 证书全自动托管（`vibedock tls`）**
    - 公网服务器直接启用 Caddy Auto-HTTPS；内网 IP 服务器支持通过 `vibedock tls --dns <dnspod|aliyun|cf>` 一键调用 `acme.sh` (DNS-01) 签发 `*.<domain>` 泛域名通配符证书并自动注册 `cron` 续期任务，之后团队成员部署任何新应用均自动挂载 HTTPS 证书。
-3. **4 大数据库一键按项目隔离（Shared Database Fleet）**
-   - 单机 Docker Compose 统一托管 **PostgreSQL 16**、**MySQL 8.0**、**MongoDB 8.0**、**Redis 7.2**，全部强制仅绑定 `127.0.0.1` 回环地址，绝不向公网暴露裸端口。
-   - 按项目幂等自动创建独立 Database、独立受限账号及 Redis ACL 键空间前缀（`vibe_<project>:*`），并可一键导出 `db.env`。
-4. **代码与状态彻底分离（Unified `/var/lib/vibedock` State Root）**
-   - Linux 生产环境将所有配置、SQLite 数据库、TLS 证书、Caddy 动态路由、SSH 密钥与已部署应用统一收口在 `/var/lib/vibedock`（可通过 `VIBEDOCK_HOME` 定制），随时执行 `npm i -g vibedock` 升级 CLI 绝不覆盖线上数据。
-5. **安全最小权限与受控运维审批**
+3. **4 大数据库三档灵活接入（Built-in Docker / 存量实例纳管 / 项目连接串直绑）**
+   - **零配置内置容器**：`vibedock db up` 一键启动 **PostgreSQL 16**、**MySQL 8.0**、**MongoDB 8.0**、**Redis 7.2**（仅绑定 `127.0.0.1` 回环地址，绝不向公网暴露裸端口）。
+   - **存量数据库纳管 (`db register`)**：若服务器本机已装有数据库或团队已有内网/云 RDS，可通过 `vibedock db register <engine> --url ...` 纳管，后续 `db provision <project>` 会直接在该实例上自动按项目建库、分权与配置 Redis ACL 前缀。
+   - **项目级连接串直绑 (`db bind`)**：无需管理员 root 密码，直接通过 `vibedock db bind <project> --postgresql <url>` 绑定现成连接串并統一导出 `db.env`。
+4. **存量基础设施非侵入适配（Nginx / Caddy 自适应 + `vibedock adopt` 存量服务纳管）**
+   - 若服务器已有 Nginx 正在运行，`vibedock setup` 与 `vibedock init` 会自动识别并切换为 **Nginx Drop-in 模式**（`/var/lib/vibedock/nginx/sites/*.conf`），不强装 Caddy、不抢占 80/443 端口、不破坏原有站点。
+   - 宿主机或内网其他机器上已在运行的存量服务（Docker 容器、systemd 服务或内网 IP 端口），只需执行 `vibedock adopt <id> --upstream http://127.0.0.1:8080 --name "存量系统"` 即可一键挂载独立子域名与门户卡片。
+5. **代码与状态彻底分离（Unified `/var/lib/vibedock` State Root）**
+   - Linux 生产环境将所有配置、SQLite 数据库、TLS 证书、Caddy/Nginx 动态路由、SSH 密钥与已部署应用统一收口在 `/var/lib/vibedock`（可通过 `VIBEDOCK_HOME` 定制），随时执行 `npm i -g vibedock` 升级 CLI 绝不覆盖线上数据。
+6. **安全最小权限与受控运维审批**
    - 部署专用受限系统账号 `vibe-deploy`，仅通过 `sudoers` 白名单调用受控 CLI；内置在线 AI 运维助手，所有变更动作（重启进程、热重载网关）均需管理员显式批准并记录审计日志。
 
 ---
@@ -41,17 +45,20 @@ sudo vibedock tls --cert /var/lib/vibedock/certs/fullchain.pem --key /var/lib/vi
 sudo vibedock doctor
 sudo vibedock start --daemon
 
-# 5. 共享数据库底座管理 (Docker Compose: PostgreSQL / MySQL / MongoDB / Redis)
-sudo vibedock db up [--types postgresql,mysql,mongodb,redis]   # 一键启动共享数据库容器
-sudo vibedock db status                                        # 查看数据库容器状态与已开通项目列表
+# 5. 数据库底座管理 (内置 Docker 容器 / 纳管本机或远程实例 / 项目直接绑定)
+sudo vibedock db up [--types postgresql,mysql,mongodb,redis]   # 一键启动内置共享数据库容器
+sudo vibedock db register postgresql --url "postgresql://..."  # 纳管本机已安装或远程/RDS 数据库实例
+sudo vibedock db bind <project-id> --postgresql "postgres://..." # 为项目直接绑定已有数据库连接串 (无需 root 密码)
+sudo vibedock db status                                        # 查看数据库状态、纳管模式与已开通项目列表
 sudo vibedock db provision <project-id> [--types all]          # 为指定项目幂等开通独立库与受限账号
 sudo vibedock db get <project-id> [--format json|env]          # 查看或导出项目的数据库连接串 (.env 格式)
-sudo vibedock db down                                          # 停止共享数据库容器
+sudo vibedock db down                                          # 停止内置共享数据库容器
 
-# 6. 应用槽位分配、发布与下架 (供管理员或受控 sudoers 网关调用)
+# 6. 应用槽位分配、发布、存量服务纳管与下架
 sudo vibedock alloc [project-id]                               # 查询下一个空闲端口 (40000-40999) 及项目已绑定的固定端口
-sudo vibedock publish [publish.json]                           # 校验契约、生成 Caddy 站点并热重载
-sudo vibedock unpublish <project-id>                           # 一键下架项目、停止 PM2 进程并清理 Caddy 路由
+sudo vibedock publish [publish.json]                           # 校验契约、生成 Caddy/Nginx 站点并热重载
+sudo vibedock adopt <id> --upstream http://127.0.0.1:8080      # 一键纳管本机或内网已有服务并自动挂载子域名与门户卡片
+sudo vibedock unpublish <project-id>                           # 一键下架项目、停止 PM2 进程并清理网关路由
 sudo vibedock pack-skill                                       # 根据最新配置重新烘焙 /var/lib/vibedock/vibedock-deploy.zip
 ```
 
