@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
@@ -18,7 +19,28 @@ import {
 } from '../deploy/databases.js';
 import { allocateAppSlot, publishApp, unpublishApp } from '../deploy/publish.js';
 import { buildCaddyConfig, buildNginxConfig } from '../deploy/caddy.js';
-import type { DatabaseEngine, PublishManifest, VibeDockConfig } from '../types.js';
+import type { DatabaseEngine, GatewayStrategy, PublishManifest, VibeDockConfig } from '../types.js';
+
+const DEFAULT_DB_PORTS: Record<DatabaseEngine, number> = {
+  postgresql: 5432,
+  mysql: 3306,
+  mongodb: 27017,
+  redis: 6379,
+};
+
+const DEDICATED_DB_PORTS: Record<DatabaseEngine, number> = {
+  postgresql: 45432,
+  mysql: 43306,
+  mongodb: 47017,
+  redis: 46379,
+};
+
+const VIBEDOCK_DB_CONTAINERS: Record<DatabaseEngine, string> = {
+  postgresql: 'vibedock-postgres',
+  mysql: 'vibedock-mysql',
+  mongodb: 'vibedock-mongodb',
+  redis: 'vibedock-redis',
+};
 
 interface ParsedFlags {
   _: string[];
@@ -49,7 +71,79 @@ function parseFlags(argv: string[]): ParsedFlags {
   return flags;
 }
 
-function ensureDbSecrets(cfg: VibeDockConfig) {
+function probePortListening(port: number, host = '127.0.0.1', timeoutMs = 300): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+    const finish = (open: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function getRunningVibeDockDbContainers(): Set<string> {
+  const res = spawnSync('docker', ['ps', '--filter', 'name=^/vibedock-', '--format', '{{.Names}}'], {
+    encoding: 'utf8',
+  });
+  if (res.status !== 0 || !res.stdout) return new Set();
+  return new Set(
+    res.stdout
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+interface HostInfrastructureProbe {
+  port80InUse: boolean;
+  existingGateway: 'nginx' | 'caddy' | 'other' | 'none';
+  occupiedDbs: Partial<Record<DatabaseEngine, boolean>>;
+}
+
+async function probeHostInfrastructure(enabledDbs: string[]): Promise<HostInfrastructureProbe> {
+  const port80InUse = await probePortListening(80, '127.0.0.1');
+  let existingGateway: 'nginx' | 'caddy' | 'other' | 'none' = 'none';
+  if (process.platform === 'linux') {
+    const nginxActive = spawnSync('systemctl', ['is-active', '--quiet', 'nginx']).status === 0;
+    const caddyActive = spawnSync('systemctl', ['is-active', '--quiet', 'caddy']).status === 0;
+    if (nginxActive) existingGateway = 'nginx';
+    else if (caddyActive) existingGateway = 'caddy';
+    else if (port80InUse) existingGateway = 'other';
+  } else if (port80InUse) {
+    existingGateway = 'other';
+  }
+
+  const runningContainers = getRunningVibeDockDbContainers();
+  const occupiedDbs: Partial<Record<DatabaseEngine, boolean>> = {};
+  for (const raw of enabledDbs) {
+    const eng = raw as DatabaseEngine;
+    const defaultPort = DEFAULT_DB_PORTS[eng];
+    if (!defaultPort) continue;
+    const containerName = VIBEDOCK_DB_CONTAINERS[eng];
+    if (runningContainers.has(containerName)) {
+      occupiedDbs[eng] = false;
+      continue;
+    }
+    occupiedDbs[eng] = await probePortListening(defaultPort, '127.0.0.1');
+  }
+
+  return { port80InUse, existingGateway, occupiedDbs };
+}
+
+function ensureDbSecrets(
+  cfg: VibeDockConfig,
+  options?: {
+    dbStrategy?: 'dedicated' | 'reuse';
+    occupiedDbs?: Partial<Record<DatabaseEngine, boolean>>;
+  },
+) {
   const secretDir = cfg.paths.dbSecretsDir;
   fs.mkdirSync(secretDir, { recursive: true, mode: 0o700 });
   try {
@@ -64,11 +158,29 @@ function ensureDbSecrets(cfg: VibeDockConfig) {
     adminData = JSON.parse(fs.readFileSync(adminFile, 'utf8'));
   } else {
     adminData = {
-      postgresql: { host: '127.0.0.1', port: 5432, user: 'postgres', password: randomToken(28) },
-      mysql: { host: '127.0.0.1', port: 3306, user: 'root', password: randomToken(28) },
-      mongodb: { host: '127.0.0.1', port: 27017, user: 'admin', password: randomToken(28) },
-      redis: { host: '127.0.0.1', port: 6379, password: randomToken(28) },
+      postgresql: { host: '127.0.0.1', port: 5432, user: 'postgres', password: randomToken(28), mode: 'docker' },
+      mysql: { host: '127.0.0.1', port: 3306, user: 'root', password: randomToken(28), mode: 'docker' },
+      mongodb: { host: '127.0.0.1', port: 27017, user: 'admin', password: randomToken(28), mode: 'docker' },
+      redis: { host: '127.0.0.1', port: 6379, password: randomToken(28), mode: 'docker' },
     };
+  }
+
+  let updatedAdmin = !fs.existsSync(adminFile);
+  if (options?.dbStrategy && options.occupiedDbs) {
+    for (const [eng, isOccupied] of Object.entries(options.occupiedDbs) as Array<[DatabaseEngine, boolean]>) {
+      if (!isOccupied || !adminData[eng]) continue;
+      if (options.dbStrategy === 'dedicated') {
+        adminData[eng].port = DEDICATED_DB_PORTS[eng];
+        adminData[eng].mode = 'docker';
+        updatedAdmin = true;
+      } else if (options.dbStrategy === 'reuse') {
+        adminData[eng].port = DEFAULT_DB_PORTS[eng];
+        adminData[eng].mode = 'external';
+        updatedAdmin = true;
+      }
+    }
+  }
+  if (updatedAdmin) {
     fs.writeFileSync(adminFile, `${JSON.stringify(adminData, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -78,12 +190,20 @@ function ensureDbSecrets(cfg: VibeDockConfig) {
   const envContent = [
     '# Auto-generated by VibeDock CLI',
     `VIBEDOCK_DB_DATA_DIR=${dbDataDir}`,
-    `VIBEDOCK_PG_USER=${adminData.postgresql.user}`,
-    `VIBEDOCK_PG_PASSWORD=${adminData.postgresql.password}`,
-    `VIBEDOCK_MYSQL_PASSWORD=${adminData.mysql.password}`,
-    `VIBEDOCK_MONGO_USER=${adminData.mongodb.user}`,
-    `VIBEDOCK_MONGO_PASSWORD=${adminData.mongodb.password}`,
-    `VIBEDOCK_REDIS_PASSWORD=${adminData.redis.password}`,
+    'VIBEDOCK_PG_BIND=127.0.0.1',
+    `VIBEDOCK_PG_PORT=${adminData.postgresql?.port || 5432}`,
+    `VIBEDOCK_PG_USER=${adminData.postgresql?.user || 'postgres'}`,
+    `VIBEDOCK_PG_PASSWORD=${adminData.postgresql?.password || ''}`,
+    'VIBEDOCK_MYSQL_BIND=127.0.0.1',
+    `VIBEDOCK_MYSQL_PORT=${adminData.mysql?.port || 3306}`,
+    `VIBEDOCK_MYSQL_PASSWORD=${adminData.mysql?.password || ''}`,
+    'VIBEDOCK_MONGO_BIND=127.0.0.1',
+    `VIBEDOCK_MONGO_PORT=${adminData.mongodb?.port || 27017}`,
+    `VIBEDOCK_MONGO_USER=${adminData.mongodb?.user || 'admin'}`,
+    `VIBEDOCK_MONGO_PASSWORD=${adminData.mongodb?.password || ''}`,
+    'VIBEDOCK_REDIS_BIND=127.0.0.1',
+    `VIBEDOCK_REDIS_PORT=${adminData.redis?.port || 6379}`,
+    `VIBEDOCK_REDIS_PASSWORD=${adminData.redis?.password || ''}`,
     '',
   ].join('\n');
   fs.writeFileSync(dbEnvFile, envContent, { mode: 0o600 });
@@ -177,10 +297,13 @@ function syncCatalogEnvironment(cfg: VibeDockConfig): void {
   if (!fs.existsSync(catalogPath)) return;
   try {
     const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
+    const isDedicatedChain = cfg.gatewayStrategy === 'dedicated-chain';
     const hasCustomTls =
+      !isDedicatedChain &&
       cfg.domainMode === 'custom' &&
       Boolean(cfg.tls?.certFile && cfg.tls?.keyFile);
-    const scheme = cfg.domainMode === 'nip' || (cfg.gateway === 'nginx' && !hasCustomTls) ? 'http' : 'https';
+    const scheme =
+      cfg.domainMode === 'nip' || isDedicatedChain || (cfg.gateway === 'nginx' && !hasCustomTls) ? 'http' : 'https';
     catalog.environment = {
       ...(catalog.environment || {}),
       name: `${cfg.brandName} Server`,
@@ -189,6 +312,8 @@ function syncCatalogEnvironment(cfg: VibeDockConfig): void {
       address: cfg.serverHost,
       domainSuffix: cfg.primaryDomain,
       backupDomainSuffix: cfg.backupDomain || '',
+      gatewayPort: cfg.gatewayStrategy === 'dedicated-port' ? cfg.gatewayHttpPort || 8080 : 80,
+      gatewayTlsPort: cfg.gatewayStrategy === 'dedicated-port' ? cfg.gatewayHttpsPort || 8443 : 443,
     };
     if (Array.isArray(catalog.projects)) {
       for (const proj of catalog.projects) {
@@ -207,7 +332,8 @@ function syncCatalogEnvironment(cfg: VibeDockConfig): void {
           }
         }
         const siteFile = path.join(cfg.paths.caddySitesDir, `${proj.id}.caddy`);
-        if (proj.id !== 'vibedock-portal' && fs.existsSync(siteFile)) {
+        if (proj.id !== 'vibedock-portal' && (fs.existsSync(siteFile) || cfg.gateway === 'caddy')) {
+          fs.mkdirSync(cfg.paths.caddySitesDir, { recursive: true, mode: 0o755 });
           fs.writeFileSync(siteFile, `# Managed by VibeDock (${proj.id})\n${buildCaddyConfig(proj)}\n`, 'utf8');
         }
         const nginxSitesDir = cfg.paths.nginxSitesDir || path.join(cfg.paths.dataDir, 'nginx/sites');
@@ -239,8 +365,10 @@ function isPrivateOrLocalHost(host: string): boolean {
 }
 
 function buildPortalCaddyBlock(cfg: VibeDockConfig): string {
-  const scheme = cfg.domainMode === 'nip' ? 'http' : 'https';
+  const isDedicatedChain = cfg.gatewayStrategy === 'dedicated-chain';
+  const scheme = cfg.domainMode === 'nip' || isDedicatedChain ? 'http' : 'https';
   const hasCustomTls =
+    !isDedicatedChain &&
     cfg.domainMode === 'custom' &&
     cfg.tls?.certFile &&
     cfg.tls?.keyFile &&
@@ -255,6 +383,60 @@ function buildPortalCaddyBlock(cfg: VibeDockConfig): string {
   }
   lines.push('  reverse_proxy 127.0.0.1:39090', '}', '');
   return lines.join('\n');
+}
+
+function buildDedicatedCaddyMainConfig(cfg: VibeDockConfig): string {
+  const httpPort = cfg.gatewayHttpPort || (cfg.gatewayStrategy === 'dedicated-port' ? 8080 : 39080);
+  const httpsPort = cfg.gatewayHttpsPort || 8443;
+  const globalLines = [
+    '# Managed by VibeDock Dedicated Gateway',
+    '{',
+    '  admin 127.0.0.1:39081',
+    `  http_port ${httpPort}`,
+  ];
+  if (cfg.gatewayStrategy === 'dedicated-chain') {
+    globalLines.push('  default_bind 127.0.0.1', '  auto_https off');
+  } else {
+    globalLines.push(`  https_port ${httpsPort}`);
+    if (cfg.domainMode === 'nip') {
+      globalLines.push('  auto_https off');
+    }
+  }
+  globalLines.push('}', '', `import ${cfg.paths.caddySitesDir}/*.caddy`, '');
+  return globalLines.join('\n');
+}
+
+function buildUpstreamGatewaySnippet(cfg: VibeDockConfig): string {
+  const httpPort = cfg.gatewayHttpPort || 39080;
+  return [
+    '# ============================================================================',
+    '# VibeDock 双层串联网关 (Two-Tier Gateway Chaining) 一次性外层转发规则',
+    `# 内部专用网关监听: http://127.0.0.1:${httpPort}`,
+    '# 后续所有 VibeDock 应用发布/下线均只热重载内部专用网关，外层网关永久免改动！',
+    '# ============================================================================',
+    '',
+    '# [方案 A] 如果外层是 Nginx，请将以下 server 块加入您的 Nginx 配置并执行一次 nginx -s reload:',
+    'server {',
+    '    listen 80;',
+    `    server_name portal.${cfg.primaryDomain} services.${cfg.primaryDomain} *.${cfg.primaryDomain};`,
+    '    location / {',
+    `        proxy_pass http://127.0.0.1:${httpPort};`,
+    '        proxy_http_version 1.1;',
+    '        proxy_set_header Upgrade $http_upgrade;',
+    '        proxy_set_header Connection "upgrade";',
+    '        proxy_set_header Host $host;',
+    '        proxy_set_header X-Real-IP $remote_addr;',
+    '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+    '        proxy_set_header X-Forwarded-Proto $scheme;',
+    '    }',
+    '}',
+    '',
+    '# [方案 B] 如果外层是 Caddy，请将以下站点块加入主 Caddyfile 并执行一次 caddy reload:',
+    `# http://portal.${cfg.primaryDomain}, http://services.${cfg.primaryDomain}, http://*.${cfg.primaryDomain} {`,
+    `#   reverse_proxy 127.0.0.1:${httpPort}`,
+    '# }',
+    '',
+  ].join('\n');
 }
 
 function buildPortalNginxBlock(cfg: VibeDockConfig): string {
@@ -316,7 +498,55 @@ function syncHostIntegrationIfReady(cfg: VibeDockConfig, pubFile?: string): void
     fs.mkdirSync(cfg.paths.appsDir, { recursive: true, mode: 0o755 });
     spawnSync('chown', [`${cfg.deployUser}:${cfg.deployUser}`, cfg.paths.appsDir]);
     const gateway = cfg.gateway || 'caddy';
-    if (gateway === 'nginx') {
+    const strategy = cfg.gatewayStrategy || (gateway === 'none' ? 'none' : 'reuse');
+
+    if (strategy === 'dedicated-chain' || strategy === 'dedicated-port') {
+      fs.mkdirSync(path.dirname(cfg.paths.caddyConfig), { recursive: true, mode: 0o755 });
+      fs.mkdirSync(cfg.paths.caddySitesDir, { recursive: true, mode: 0o755 });
+      fs.writeFileSync(path.join(cfg.paths.caddySitesDir, '00-vibedock-portal.caddy'), buildPortalCaddyBlock(cfg), 'utf8');
+      fs.writeFileSync(cfg.paths.caddyConfig, buildDedicatedCaddyMainConfig(cfg), 'utf8');
+      if (strategy === 'dedicated-chain') {
+        fs.writeFileSync(
+          path.join(cfg.paths.dataDir, 'gateway-upstream-snippet.conf'),
+          buildUpstreamGatewaySnippet(cfg),
+          'utf8',
+        );
+      }
+      if (fs.existsSync('/etc/nginx/conf.d/vibedock.conf')) {
+        fs.rmSync('/etc/nginx/conf.d/vibedock.conf', { force: true });
+        spawnSync(cfg.paths.nginxBin || 'nginx', ['-s', 'reload'], { stdio: 'ignore' });
+      }
+      if (fs.existsSync('/etc/systemd/system')) {
+        const unitContent = [
+          '[Unit]',
+          'Description=VibeDock Dedicated Gateway (Caddy)',
+          'After=network.target network-online.target',
+          'Requires=network-online.target',
+          '',
+          '[Service]',
+          'Type=notify',
+          'User=root',
+          'Group=root',
+          `ExecStart=/usr/bin/caddy run --environ --config ${cfg.paths.caddyConfig}`,
+          `ExecReload=/usr/bin/caddy reload --config ${cfg.paths.caddyConfig} --force`,
+          'TimeoutStopSec=5s',
+          'LimitNOFILE=1048576',
+          'PrivateTmp=true',
+          'Restart=on-failure',
+          '',
+          '[Install]',
+          'WantedBy=multi-user.target',
+          '',
+        ].join('\n');
+        fs.writeFileSync('/etc/systemd/system/vibedock-caddy.service', unitContent, 'utf8');
+        spawnSync('systemctl', ['daemon-reload'], { stdio: 'ignore' });
+        spawnSync('systemctl', ['enable', '--now', 'vibedock-caddy'], { stdio: 'ignore' });
+      }
+      spawnSync(cfg.paths.caddyBin || 'caddy', ['reload', '--config', cfg.paths.caddyConfig], { stdio: 'ignore' });
+    } else if (gateway === 'nginx') {
+      if (fs.existsSync('/etc/systemd/system/vibedock-caddy.service')) {
+        spawnSync('systemctl', ['disable', '--now', 'vibedock-caddy'], { stdio: 'ignore' });
+      }
       const nginxSitesDir = cfg.paths.nginxSitesDir || path.join(cfg.paths.dataDir, 'nginx/sites');
       fs.mkdirSync(nginxSitesDir, { recursive: true, mode: 0o755 });
       fs.writeFileSync(path.join(nginxSitesDir, '00-vibedock-portal.conf'), buildPortalNginxBlock(cfg), 'utf8');
@@ -327,6 +557,9 @@ function syncHostIntegrationIfReady(cfg: VibeDockConfig, pubFile?: string): void
         spawnSync(cfg.paths.nginxBin || 'nginx', ['-s', 'reload'], { stdio: 'ignore' });
       }
     } else if (gateway === 'caddy') {
+      if (fs.existsSync('/etc/systemd/system/vibedock-caddy.service')) {
+        spawnSync('systemctl', ['disable', '--now', 'vibedock-caddy'], { stdio: 'ignore' });
+      }
       fs.mkdirSync(cfg.paths.caddySitesDir, { recursive: true, mode: 0o755 });
       fs.writeFileSync(path.join(cfg.paths.caddySitesDir, '00-vibedock-portal.caddy'), buildPortalCaddyBlock(cfg), 'utf8');
       if (fs.existsSync(cfg.paths.caddyConfig)) {
@@ -373,6 +606,25 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
         .filter(Boolean)
     : ['postgresql', 'mysql', 'mongodb', 'redis'];
 
+  const probe = await probeHostInfrastructure(enabledDbs);
+  const occupiedDbList = Object.entries(probe.occupiedDbs)
+    .filter(([, inUse]) => inUse)
+    .map(([eng]) => `${eng}:${DEFAULT_DB_PORTS[eng as DatabaseEngine]}`);
+
+  let gatewayStrategy: GatewayStrategy =
+    flags['gateway-strategy'] === 'dedicated-chain' ||
+    flags['gateway-strategy'] === 'dedicated-port' ||
+    flags['gateway-strategy'] === 'none' ||
+    flags['gateway-strategy'] === 'reuse'
+      ? (flags['gateway-strategy'] as GatewayStrategy)
+      : flags.gateway === 'none'
+        ? 'none'
+        : 'reuse';
+  let gatewayHttpPort = flags['gateway-http-port'] ? Number(flags['gateway-http-port']) : undefined;
+  let gatewayHttpsPort = flags['gateway-https-port'] ? Number(flags['gateway-https-port']) : undefined;
+  let dbStrategy: 'dedicated' | 'reuse' =
+    flags['db-strategy'] === 'reuse' ? 'reuse' : 'dedicated';
+
   if (!nonInteractive && process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     console.log('\n🚀 欢迎使用 VibeDock 初始化向导 (AI-Native 团队应用与数据库门户)\n');
@@ -393,19 +645,78 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
         .map((s) => s.trim())
         .filter(Boolean);
     }
+
+    if (!flags['gateway-strategy'] && !flags.gateway && probe.port80InUse) {
+      console.log(`\n🔍 检测到本机 80 端口已有网关运行 (${probe.existingGateway})，请选择网关共存策略 (不替您做选择):`);
+      console.log(`   [1] 复用已有网关 (reuse)          — 在现有 ${probe.existingGateway} 中通过 drop-in 目录动态挂载子域名`);
+      console.log('   [2] 新建专用网关·双层串联 (chain) — 启动独立 VibeDock 专用网关 (127.0.0.1:39080)，原网关仅需配 1 条泛域名转发且后续永不改动');
+      console.log('   [3] 新建专用网关·独立端口 (port)  — 启动独立 VibeDock 专用网关监听独立端口 (默认 8080/8443)，与 80/443 完全物理隔离');
+      console.log('   [4] 无本机网关 (none)             — 仅管理应用进程，由外部负载均衡 / Tunnel 透传');
+      const gwChoice = (await rl.question('   请选择网关策略 [1/2/3/4，默认 1]: ')).trim();
+      if (gwChoice === '2' || gwChoice === 'chain' || gwChoice === 'dedicated-chain') {
+        gatewayStrategy = 'dedicated-chain';
+      } else if (gwChoice === '3' || gwChoice === 'port' || gwChoice === 'dedicated-port') {
+        gatewayStrategy = 'dedicated-port';
+        const pAns = (await rl.question('   请输入专用网关 HTTP 端口 [8080]: ')).trim();
+        gatewayHttpPort = pAns ? Number(pAns) : 8080;
+      } else if (gwChoice === '4' || gwChoice === 'none') {
+        gatewayStrategy = 'none';
+      } else {
+        gatewayStrategy = 'reuse';
+      }
+    }
+
+    if (!flags['db-strategy'] && occupiedDbList.length > 0) {
+      console.log(`\n🔍 检测到本机默认数据库端口已被已有服务占用 (${occupiedDbList.join(', ')})，请选择数据库共存策略:`);
+      console.log('   [1] 新建专用容器并自动避让端口 (dedicated) — 原数据库保持不动，VibeDock 专用容器自动改用 45432/43306/47017/46379 新旧并存');
+      console.log('   [2] 复用本机已有数据库实例 (reuse)         — 不新建冲突容器，将占用引擎标记为 external 供 vibedock db register/bind 接入');
+      const dbChoice = (await rl.question('   请选择数据库策略 [1/2，默认 1]: ')).trim();
+      dbStrategy = dbChoice === '2' || dbChoice === 'reuse' ? 'reuse' : 'dedicated';
+    }
+
     rl.close();
+  }
+
+  if (gatewayStrategy === 'dedicated-chain' && !gatewayHttpPort) {
+    gatewayHttpPort = 39080;
+  } else if (gatewayStrategy === 'dedicated-port') {
+    if (!gatewayHttpPort) gatewayHttpPort = 8080;
+    if (!gatewayHttpsPort) gatewayHttpsPort = 8443;
   }
 
   const adminPassword = String(flags['admin-password'] || `vd-${randomToken(10)}`);
   const inviteCode = String(flags['invite-code'] || `team-${randomToken(6).toLowerCase()}`);
-  const gateway =
-    flags.gateway === 'nginx' || flags.gateway === 'none' || flags.gateway === 'caddy'
-      ? flags.gateway
-      : detectActiveGateway();
+  const gateway: 'caddy' | 'nginx' | 'none' =
+    gatewayStrategy === 'none'
+      ? 'none'
+      : gatewayStrategy === 'dedicated-chain' || gatewayStrategy === 'dedicated-port'
+        ? 'caddy'
+        : flags.gateway === 'nginx' || flags.gateway === 'none' || flags.gateway === 'caddy'
+          ? flags.gateway
+          : detectActiveGateway();
 
   const stateRoot = resolveStateRoot();
   fs.mkdirSync(stateRoot, { recursive: true, mode: 0o755 });
   const isUnifiedStateRoot = stateRoot === '/var/lib/vibedock' || Boolean(process.env.VIBEDOCK_HOME);
+
+  const portalScheme =
+    domainMode === 'nip' || ((gateway === 'nginx' || gatewayStrategy === 'dedicated-chain') && !(tlsCert && tlsKey))
+      ? 'http'
+      : 'https';
+  const portalPortSuffix =
+    gatewayStrategy === 'dedicated-port'
+      ? portalScheme === 'https'
+        ? gatewayHttpsPort && gatewayHttpsPort !== 443
+          ? `:${gatewayHttpsPort}`
+          : ''
+        : gatewayHttpPort && gatewayHttpPort !== 80
+          ? `:${gatewayHttpPort}`
+          : ''
+      : '';
+  const caddyConfigPath =
+    gatewayStrategy === 'dedicated-chain' || gatewayStrategy === 'dedicated-port'
+      ? path.join(stateRoot, 'caddy/Caddyfile')
+      : '/etc/caddy/Caddyfile';
 
   const configData = {
     brandName,
@@ -416,10 +727,13 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
     deployUser: 'vibe-deploy',
     appPrefix: 'team-',
     gateway,
+    gatewayStrategy,
+    gatewayHttpPort,
+    gatewayHttpsPort,
     domainMode,
     primaryDomain,
     backupDomain,
-    portalUrl: `${domainMode === 'nip' || (gateway === 'nginx' && !(tlsCert && tlsKey)) ? 'http' : 'https'}://portal.${primaryDomain}`,
+    portalUrl: `${portalScheme}://portal.${primaryDomain}${portalPortSuffix}`,
     tls: {
       certFile: tlsCert,
       keyFile: tlsKey,
@@ -429,7 +743,7 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
       dataDir: stateRoot,
       appsDir: path.join(stateRoot, 'apps'),
       caddyBin: 'caddy',
-      caddyConfig: '/etc/caddy/Caddyfile',
+      caddyConfig: caddyConfigPath,
       caddySitesDir: path.join(stateRoot, 'caddy/sites'),
       nginxBin: 'nginx',
       nginxConfig: '/etc/nginx/nginx.conf',
@@ -457,7 +771,10 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
   fs.writeFileSync(configPath, `${JSON.stringify(configData, null, 2)}\n`, { mode: 0o600 });
 
   const cfg = loadVibeDockConfig(configPath);
-  const { adminFile } = ensureDbSecrets(cfg);
+  const { adminFile, adminData } = ensureDbSecrets(cfg, {
+    dbStrategy,
+    occupiedDbs: probe.occupiedDbs,
+  });
   const { pubFile } = ensureDeployKeypair(cfg);
   syncCatalogEnvironment(cfg);
   const { zipPath } = packSkill(cfg);
@@ -479,6 +796,16 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
 
   console.log('\n✅ VibeDock 初始化完成！');
   console.log(`   - 配置文件:       ${configPath}`);
+  console.log(`   - 网关共存策略:   ${gatewayStrategy} (gateway=${gateway}${gatewayHttpPort ? `, httpPort=${gatewayHttpPort}` : ''})`);
+  if (gatewayStrategy === 'dedicated-chain') {
+    console.log(`   - 外层转发片段:   ${path.join(stateRoot, 'gateway-upstream-snippet.conf')} (仅需在外层网关配置一次泛域名转发)`);
+  }
+  if (occupiedDbList.length > 0) {
+    const dbSummary = enabledDbs
+      .map((e) => `${e}->${adminData[e]?.mode || 'docker'}:${adminData[e]?.port}`)
+      .join(', ');
+    console.log(`   - 数据库共存策略: ${dbStrategy} (${dbSummary})`);
+  }
   console.log(`   - 数据库主凭据:   ${adminFile}`);
   console.log(`   - 部署公钥:       ${pubFile}`);
   console.log(`   - 已烘焙 Skill:   ${zipPath}`);
@@ -515,15 +842,53 @@ function parseDbTypes(rawTypes: string | boolean | string[] | undefined): Databa
   return parts.filter((p): p is DatabaseEngine => valid.includes(p as DatabaseEngine));
 }
 
-function cmdDb(sub: string, flags: ParsedFlags): void {
+async function cmdDb(sub: string, flags: ParsedFlags): Promise<void> {
   const cfg = loadVibeDockConfig();
-  const { dbEnvFile } = ensureDbSecrets(cfg);
+  let { dbEnvFile, adminData } = ensureDbSecrets(cfg);
   const composeFile = cfg.databases.composeFile;
 
   if (sub === 'up') {
-    const types = flags.types ? parseDbTypes(flags.types) : cfg.databases.enabled;
-    const profileArgs = types.flatMap((t) => ['--profile', t]);
-    console.log(`==> 正在通过 Docker Compose 启动共享数据库: ${types.join(', ')} ...`);
+    const requestedTypes = flags.types ? parseDbTypes(flags.types) : parseDbTypes(cfg.databases.enabled);
+    const strategyFlag = flags.strategy === 'reuse' || flags['db-strategy'] === 'reuse' ? 'reuse' : 'dedicated';
+    const runningContainers = getRunningVibeDockDbContainers();
+    const occupiedDbs: Partial<Record<DatabaseEngine, boolean>> = {};
+    for (const eng of requestedTypes) {
+      if (adminData[eng]?.mode === 'external') continue;
+      const containerName = VIBEDOCK_DB_CONTAINERS[eng];
+      if (runningContainers.has(containerName)) continue;
+      const targetPort = Number(adminData[eng]?.port || DEFAULT_DB_PORTS[eng]);
+      if (await probePortListening(targetPort, '127.0.0.1')) {
+        occupiedDbs[eng] = true;
+      }
+    }
+    if (Object.keys(occupiedDbs).length > 0) {
+      const updated = ensureDbSecrets(cfg, { dbStrategy: strategyFlag, occupiedDbs });
+      dbEnvFile = updated.dbEnvFile;
+      adminData = updated.adminData;
+      for (const eng of Object.keys(occupiedDbs) as DatabaseEngine[]) {
+        if (strategyFlag === 'dedicated') {
+          console.log(
+            `⚡ 检测到本机 ${eng} 默认端口 (${DEFAULT_DB_PORTS[eng]}) 已被已有服务占用，已自动将 VibeDock 专用容器切换至并存端口 ${adminData[eng].port}`,
+          );
+        } else {
+          console.log(`ℹ️ 检测到本机 ${eng} 默认端口已占用，已按 reuse 策略标记为 external 实例`);
+        }
+      }
+    }
+
+    const externalTypes = requestedTypes.filter((t) => adminData[t]?.mode === 'external');
+    const dockerTypes = requestedTypes.filter((t) => adminData[t]?.mode !== 'external');
+    if (externalTypes.length > 0) {
+      console.log(`ℹ️ 跳过外部/宿主机已纳管数据库 (${externalTypes.join(', ')})，保持原有实例运行`);
+    }
+    if (dockerTypes.length === 0) {
+      console.log('✅ 所有目标数据库均由外部/宿主机实例提供，无需启动额外 Docker 容器。');
+      return;
+    }
+    const profileArgs = dockerTypes.flatMap((t) => ['--profile', t]);
+    console.log(
+      `==> 正在通过 Docker Compose 启动专用数据库容器: ${dockerTypes.map((t) => `${t}:${adminData[t]?.port || DEFAULT_DB_PORTS[t]}`).join(', ')} ...`,
+    );
     const res = spawnSync('docker', ['compose', '--env-file', dbEnvFile, '-f', composeFile, ...profileArgs, 'up', '-d'], {
       stdio: 'inherit',
     });
@@ -738,15 +1103,22 @@ async function cmdDoctor(): Promise<void> {
 
   let gatewayStatusLine = '';
   let gatewayOk = true;
-  if (gateway === 'nginx') {
+  const strategy = cfg.gatewayStrategy || (gateway === 'none' ? 'none' : 'reuse');
+  if (strategy === 'dedicated-chain') {
+    gatewayOk = Boolean(caddyVer);
+    gatewayStatusLine = `${gatewayOk ? '✅' : '❌'} 专用网关 (串联): ${caddyVer || '未安装'} (监听 127.0.0.1:${cfg.gatewayHttpPort || 39080}，与外层网关双层串联共存)`;
+  } else if (strategy === 'dedicated-port') {
+    gatewayOk = Boolean(caddyVer);
+    gatewayStatusLine = `${gatewayOk ? '✅' : '❌'} 专用网关 (独立): ${caddyVer || '未安装'} (独立端口 HTTP=${cfg.gatewayHttpPort || 8080} / HTTPS=${cfg.gatewayHttpsPort || 8443}，零侵入并存)`;
+  } else if (gateway === 'nginx') {
     gatewayOk = Boolean(nginxVer);
-    gatewayStatusLine = `${gatewayOk ? '✅' : '❌'} Nginx 网关:      ${nginxVer || '未安装'} (接管本机 Nginx drop-in 模式)`;
+    gatewayStatusLine = `${gatewayOk ? '✅' : '❌'} Nginx 网关:      ${nginxVer || '未安装'} (复用本机 Nginx drop-in 模式)`;
   } else if (gateway === 'none') {
     gatewayOk = true;
     gatewayStatusLine = 'ℹ️ 网关模式:         none (外部 SLB / Cloudflare Tunnel / FRP 透传模式)';
   } else {
     gatewayOk = Boolean(caddyVer);
-    gatewayStatusLine = `${gatewayOk ? '✅' : '❌'} Caddy 网关:      ${caddyVer || '未安装'}`;
+    gatewayStatusLine = `${gatewayOk ? '✅' : '❌'} Caddy 网关:      ${caddyVer || '未安装'} (复用本机 Caddy 模式)`;
   }
 
   console.log(`=== ${cfg.brandName} 全量底座自检 (Doctor) ===`);
@@ -1062,7 +1434,11 @@ async function main(): Promise<void> {
     const { zipPath } = packSkill(cfg);
     console.log(`✅ 已重新烘焙团队专属 AI Skill 包: ${zipPath}`);
   } else if (cmd === 'db') {
-    cmdDb(flags._[1] || 'status', flags);
+    await cmdDb(flags._[1] || 'status', flags);
+  } else if (cmd === 'sync-gateway') {
+    const cfg = loadVibeDockConfig();
+    const { pubFile } = ensureDeployKeypair(cfg);
+    syncHostIntegrationIfReady(cfg, pubFile);
   } else if (cmd === 'adopt') {
     cmdAdopt(flags);
   } else if (cmd === 'publish') {
@@ -1081,11 +1457,11 @@ async function main(): Promise<void> {
   } else {
     console.log(
       [
-        'VibeDock CLI (v0.0.2) — 自建 AI-Native 团队应用与数据库云',
+        'VibeDock CLI (v0.0.3) — 自建 AI-Native 团队应用与数据库云',
         '',
         '常用命令:',
         '  vibedock setup                           一键安装 Ubuntu 生产底座 (自动识别已有 Nginx 或安装 Caddy)',
-        '  vibedock init [--yes] [--gateway ...]    交互式初始化配置、随机密钥并烘焙专属 AI Skill 包',
+        '  vibedock init [--gateway-strategy ...]   初始化配置、自主选择网关/数据库新旧共存策略并烘焙 AI Skill 包',
         '  vibedock tls [--dns|--cert]              使用 acme.sh (DNS-01) 签发泛域名证书或绑定自定义 HTTPS 证书',
         '  vibedock start [--daemon]                启动门户与 AI 诊断服务 (--daemon 使用 PM2 后台守护)',
         '  vibedock doctor                          检查本机核心底座依赖、DNS 泛解析与 HTTPS 证书状态',

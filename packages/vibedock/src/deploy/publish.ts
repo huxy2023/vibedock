@@ -36,7 +36,11 @@ function loadCatalog(cfg: VibeDockConfig): { catalogPath: string; catalog: Catal
     return {
       catalogPath,
       catalog: {
-        environment: { name: `${cfg.brandName} Server` } as any,
+        environment: {
+          name: `${cfg.brandName} Server`,
+          gatewayPort: cfg.gatewayStrategy === 'dedicated-port' ? cfg.gatewayHttpPort || 8080 : 80,
+          gatewayTlsPort: cfg.gatewayStrategy === 'dedicated-port' ? cfg.gatewayHttpsPort || 8443 : 443,
+        } as any,
         projects: [],
       },
     };
@@ -241,7 +245,9 @@ export function publishApp(
 
     const gateway = cfg.gateway || 'caddy';
     const isNginx = gateway === 'nginx';
+    const isDedicatedChain = cfg.gatewayStrategy === 'dedicated-chain';
     const customTls =
+      !isDedicatedChain &&
       cfg.domainMode === 'custom' &&
       cfg.tls?.certFile &&
       cfg.tls?.keyFile &&
@@ -249,7 +255,7 @@ export function publishApp(
       /^\/[A-Za-z0-9._/-]+$/.test(cfg.tls.keyFile)
         ? { certificateFile: cfg.tls.certFile, keyFile: cfg.tls.keyFile }
         : undefined;
-    const scheme = cfg.domainMode === 'nip' || (isNginx && !customTls) ? 'http' : 'https';
+    const scheme = cfg.domainMode === 'nip' || isDedicatedChain || (isNginx && !customTls) ? 'http' : 'https';
     const rawRoutes =
       Array.isArray(manifest.routes) && manifest.routes.length > 0
         ? manifest.routes
@@ -359,8 +365,18 @@ export function publishApp(
     catalog.projects.push(projectEntry);
     writeFileAtomic(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, 0o644);
 
+    const portSuffix =
+      cfg.gatewayStrategy === 'dedicated-port'
+        ? scheme === 'https'
+          ? cfg.gatewayHttpsPort && cfg.gatewayHttpsPort !== 443
+            ? `:${cfg.gatewayHttpsPort}`
+            : ''
+          : cfg.gatewayHttpPort && cfg.gatewayHttpPort !== 80
+            ? `:${cfg.gatewayHttpPort}`
+            : ''
+        : '';
     const urls = Array.from(
-      new Set(ingressRules.flatMap((r) => r.match.hosts.map((h) => `${r.match.scheme || 'http'}://${h}`))),
+      new Set(ingressRules.flatMap((r) => r.match.hosts.map((h) => `${r.match.scheme || 'http'}://${h}${portSuffix}`))),
     );
     return { projectId, name, owner, urls, siteFile };
   });

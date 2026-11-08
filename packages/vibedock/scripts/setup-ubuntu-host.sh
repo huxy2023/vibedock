@@ -29,12 +29,8 @@ fi
 
 echo "==> [1/5] 检查并安装 Ubuntu 系统基础组件 (SSHD / 网关 / rsync / zip / cron)"
 NEED_APT=0
-PKGS="curl ca-certificates gnupg openssh-server zip unzip rsync cron"
-CHECK_LIST="sshd:openssh-server rsync:rsync zip:zip unzip:unzip curl:curl gpg:gnupg crontab:cron"
-if [[ "${USE_NGINX}" -eq 0 ]]; then
-  PKGS="${PKGS} caddy"
-  CHECK_LIST="${CHECK_LIST} caddy:caddy"
-fi
+PKGS="curl ca-certificates gnupg openssh-server zip unzip rsync cron caddy"
+CHECK_LIST="sshd:openssh-server rsync:rsync zip:zip unzip:unzip curl:curl gpg:gnupg crontab:cron caddy:caddy"
 
 for pkg_cmd in ${CHECK_LIST}; do
   cmd_name="${pkg_cmd%%:*}"
@@ -79,6 +75,8 @@ if command -v systemctl &>/dev/null; then
   systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
   if [[ "${USE_NGINX}" -eq 0 ]]; then
     systemctl enable --now caddy 2>/dev/null || true
+  else
+    systemctl disable --now caddy 2>/dev/null || true
   fi
 fi
 
@@ -156,47 +154,24 @@ chmod 440 /etc/sudoers.d/vibedock
 visudo -cf /etc/sudoers.d/vibedock
 
 echo "==> [5/5] 配置网关站点导入与门户反向代理"
-if [[ "${USE_NGINX}" -eq 1 ]]; then
-  echo "    检测到本机已有 Nginx 正在运行，采用非侵入式 Nginx drop-in 模式 (${NGINX_SITES_DIR})..."
-  "${NODE_BIN}" -e "
-const fs = require('fs');
-let domain = '127.0.0.1.nip.io';
-let tlsLines = '';
-try {
-  const cfg = JSON.parse(fs.readFileSync('${CONFIG_FILE}', 'utf8'));
-  domain = cfg.primaryDomain || domain;
-  if (cfg.domainMode === 'custom' && cfg.tls && cfg.tls.certFile && cfg.tls.keyFile) {
-    tlsLines = '    listen 443 ssl;\n    ssl_certificate ' + cfg.tls.certFile + ';\n    ssl_certificate_key ' + cfg.tls.keyFile + ';\n';
-  }
-} catch {}
-const content = '# Managed by VibeDock (Portal Reverse Proxy)\nserver {\n    listen 80;\n' + tlsLines + '    server_name portal.' + domain + ' services.' + domain + ';\n    location / {\n        proxy_pass http://127.0.0.1:39090;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade \$http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto \$scheme;\n    }\n}\n';
-fs.writeFileSync('${NGINX_SITES_DIR}/00-vibedock-portal.conf', content, 'utf8');
-"
-  if [[ -d /etc/nginx/conf.d ]]; then
-    printf "# Managed by VibeDock\ninclude %s/*.conf;\n" "${NGINX_SITES_DIR}" > /etc/nginx/conf.d/vibedock.conf
+if [[ -f "${CONFIG_FILE}" ]]; then
+  if [[ "${USE_NGINX}" -eq 0 ]] && [[ -d "$(dirname "${CADDY_MAIN_CONFIG}")" ]]; then
+    IMPORT_LINE="import ${CADDY_SITES_DIR}/*.caddy"
+    if [[ ! -f "${CADDY_MAIN_CONFIG}" ]] || ! grep -Fq "${IMPORT_LINE}" "${CADDY_MAIN_CONFIG}"; then
+      printf "\n# VibeDock managed sites\n%s\n" "${IMPORT_LINE}" >> "${CADDY_MAIN_CONFIG}"
+    fi
   fi
-  if command -v nginx &>/dev/null; then
-    nginx -t && nginx -s reload || true
-  fi
+  export VIBEDOCK_HOME="${VIBEDOCK_HOME}"
+  "${NODE_BIN}" "${ROOT_DIR}/dist/cli/main.js" sync-gateway
+elif [[ "${USE_NGINX}" -eq 1 ]]; then
+  echo "    检测到本机已有 Nginx 正在监听 80 端口，未主动修改 /etc/nginx 配置（尊重用户选择）。"
+  echo "    稍后运行 sudo vibedock init 时，可选择：复用已有网关 (reuse) / 双层串联专用网关 (dedicated-chain) / 独立端口专用网关 (dedicated-port)。"
 else
   "${NODE_BIN}" -e "
 const fs = require('fs');
-let hostLine = 'http://portal.127.0.0.1.nip.io';
-let tlsLine = '';
-try {
-  const cfg = JSON.parse(fs.readFileSync('${CONFIG_FILE}', 'utf8'));
-  const domain = cfg.primaryDomain || '127.0.0.1.nip.io';
-  const mode = cfg.domainMode || 'nip';
-  const scheme = mode === 'nip' ? 'http' : 'https';
-  hostLine = scheme + '://portal.' + domain + ', ' + scheme + '://services.' + domain;
-  if (mode === 'custom' && cfg.tls && cfg.tls.certFile && cfg.tls.keyFile) {
-    tlsLine = '  tls ' + cfg.tls.certFile + ' ' + cfg.tls.keyFile + '\n';
-  }
-} catch {}
-const content = '# Managed by VibeDock (Portal Reverse Proxy)\n' + hostLine + ' {\n' + tlsLine + '  reverse_proxy 127.0.0.1:39090\n}\n';
+const content = '# Managed by VibeDock (Portal Reverse Proxy)\nhttp://portal.127.0.0.1.nip.io, http://services.127.0.0.1.nip.io {\n  reverse_proxy 127.0.0.1:39090\n}\n';
 fs.writeFileSync('${CADDY_SITES_DIR}/00-vibedock-portal.caddy', content, 'utf8');
 "
-
   if [[ -d "$(dirname "${CADDY_MAIN_CONFIG}")" ]]; then
     IMPORT_LINE="import ${CADDY_SITES_DIR}/*.caddy"
     if [[ -f "${CADDY_MAIN_CONFIG}" ]]; then

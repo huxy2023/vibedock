@@ -282,3 +282,57 @@ test('supports registering external DB instances and binding project connection 
   assert.match(envOut, /POSTGRES_URL="postgresql:\/\/app_user:p'inject@10\.0\.0\.50:5432\/analytics_db"/);
   assert.match(envOut, /REDIS_URL="redis:\/\/:redis_pass@10\.0\.0\.51:6379\/2"/);
 });
+
+test('supports dedicated-port and dedicated-chain gateway strategies and side-by-side DB ports', async (context) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibedock-coexist-'));
+  context.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cfgFile = path.join(dir, 'vibedock.config.json');
+  fs.writeFileSync(
+    cfgFile,
+    JSON.stringify({
+      serverHost: '192.168.1.10',
+      primaryDomain: '192.168.1.10.nip.io',
+      domainMode: 'nip',
+      gateway: 'caddy',
+      gatewayStrategy: 'dedicated-port',
+      gatewayHttpPort: 8080,
+      gatewayHttpsPort: 8443,
+      paths: {
+        dataDir: dir,
+        appsDir: path.join(dir, 'apps'),
+        caddyConfig: path.join(dir, 'nonexistent-caddyfile'),
+        caddySitesDir: path.join(dir, 'caddy/sites'),
+        dbSecretsDir: path.join(dir, 'secrets/databases'),
+      },
+    }),
+  );
+  fs.mkdirSync(path.join(dir, 'secrets/databases'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'secrets/databases/admin.json'),
+    JSON.stringify({
+      postgresql: { host: '127.0.0.1', port: 45432, user: 'postgres', password: 'pw', mode: 'docker' },
+      redis: { host: '127.0.0.1', port: 46379, password: 'pw', mode: 'docker' },
+    }),
+  );
+
+  const cfg = loadVibeDockConfig(cfgFile);
+  const res = publishApp(cfg, {
+    id: 'coexist-demo',
+    name: '并存演示应用',
+    owner: 'SRE',
+    description: '并存演示应用',
+    components: [{ id: 'upstream', kind: 'external', upstream: 'http://127.0.0.1:18080' }],
+  });
+  assert.deepEqual(res.urls, ['http://team-coexist-demo.192.168.1.10.nip.io:8080']);
+
+  const catalogPath = path.join(dir, 'catalog.json');
+  const svc = createCatalogService(JSON.parse(fs.readFileSync(catalogPath, 'utf8')), {
+    catalogFile: catalogPath,
+    checker: async (listener) => ({ online: listener.port === 45432 || listener.port === 18080 }),
+  });
+  const snap = await svc.snapshot();
+  const pgInfo = snap.dx.databases.find((d) => d.id === 'postgresql');
+  assert.equal(pgInfo.port, 45432);
+  assert.equal(pgInfo.online, true);
+  assert.match(pgInfo.exampleUrl, /:45432\//);
+});

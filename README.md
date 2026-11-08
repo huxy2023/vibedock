@@ -12,13 +12,16 @@
    - 团队成员装好 Skill 后，无需记忆服务器 IP、SSH 密钥或 Caddy 语法，直接对 AI 编程助手说句话即可完成端口分配、构建产物上传、PM2 守护与独立子域名路由。
 2. **公网与内网泛域名 HTTPS 证书全自动托管（`vibedock tls`）**
    - 公网服务器直接启用 Caddy Auto-HTTPS；内网 IP 服务器支持通过 `vibedock tls --dns <dnspod|aliyun|cf>` 一键调用 `acme.sh` (DNS-01) 签发 `*.<domain>` 泛域名通配符证书并自动注册 `cron` 续期任务，之后团队成员部署任何新应用均自动挂载 HTTPS 证书。
-3. **4 大数据库三档灵活接入（Built-in Docker / 存量实例纳管 / 项目连接串直绑）**
-   - **零配置内置容器**：`vibedock db up` 一键启动 **PostgreSQL 16**、**MySQL 8.0**、**MongoDB 8.0**、**Redis 7.2**（仅绑定 `127.0.0.1` 回环地址，绝不向公网暴露裸端口）。
-   - **存量数据库纳管 (`db register`)**：若服务器本机已装有数据库或团队已有内网/云 RDS，可通过 `vibedock db register <engine> --url ...` 纳管，后续 `db provision <project>` 会直接在该实例上自动按项目建库、分权与配置 Redis ACL 前缀。
-   - **项目级连接串直绑 (`db bind`)**：无需管理员 root 密码，直接通过 `vibedock db bind <project> --postgresql <url>` 绑定现成连接串并統一导出 `db.env`。
-4. **存量基础设施非侵入适配（Nginx / Caddy 自适应 + `vibedock adopt` 存量服务纳管）**
-   - 若服务器已有 Nginx 正在运行，`vibedock setup` 与 `vibedock init` 会自动识别并切换为 **Nginx Drop-in 模式**（`/var/lib/vibedock/nginx/sites/*.conf`），不强装 Caddy、不抢占 80/443 端口、不破坏原有站点。
-   - 宿主机或内网其他机器上已在运行的存量服务（Docker 容器、systemd 服务或内网 IP 端口），只需执行 `vibedock adopt <id> --upstream http://127.0.0.1:8080 --name "存量系统"` 即可一键挂载独立子域名与门户卡片。
+3. **4 大数据库三档灵活接入与新旧并存（自动避让端口 / 存量实例纳管 / 项目连接串直绑）**
+   - **新旧并存自动避让 (`--db-strategy dedicated`)**：`vibedock init` 与 `vibedock db up` 自动探测本机端口；若默认端口（`5432/3306/27017/6379`）已被存量数据库占用，可一键将 VibeDock 专用容器平滑切换至并存端口（`45432/43306/47017/46379`），新旧数据库同机并存、互不干扰。
+   - **存量数据库纳管 (`--db-strategy reuse` / `db register`)**：若选择复用本机或远程/RDS 数据库，可通过 `vibedock db register <engine> --url ...` 纳管，后续 `db provision <project>` 直接在该实例上自动按项目建库、分权与配置 Redis ACL 前缀。
+   - **项目级连接串直绑 (`db bind`)**：无需管理员 root 密码，直接通过 `vibedock db bind <project> --postgresql <url>` 绑定现成连接串并统一导出 `db.env`。
+4. **网关新旧共存与用户自主选择（`--gateway-strategy reuse | dedicated-chain | dedicated-port | none`）**
+   - **绝不替用户做决定**：当检测到本机 80 端口已有 Nginx/Caddy 运行时，`vibedock init` 主动呈现基础设施探测报告并交由用户选择：
+     - **`reuse`（复用现有网关）**：通过 `/var/lib/vibedock/nginx/sites/*.conf` 或 Caddy `import` 非侵入挂载子域名。
+     - **`dedicated-chain`（双层串联专用网关）**：新建独立 `vibedock-caddy` 守护进程仅绑定 `127.0.0.1:39080` 并生成一次性外层泛域名转发片段（`/var/lib/vibedock/gateway-upstream-snippet.conf`），后续发布/下线应用只热重载内部专用网关，原 Nginx/Caddy 永久零改动、零重载。
+     - **`dedicated-port`（独立端口专用网关）**：新建独立 `vibedock-caddy` 监听独立端口（默认 `8080/8443`，可自定义），与本机 `80/443` 物理隔离，门户与发布链接自动携带端口。
+   - **存量服务一键纳管 (`vibedock adopt`)**：宿主机或内网其他机器上已在运行的服务，只需执行 `vibedock adopt <id> --upstream http://127.0.0.1:8080 --name "存量系统"` 即可一键挂载独立子域名与门户卡片。
 5. **代码与状态彻底分离（Unified `/var/lib/vibedock` State Root）**
    - Linux 生产环境将所有配置、SQLite 数据库、TLS 证书、Caddy/Nginx 动态路由、SSH 密钥与已部署应用统一收口在 `/var/lib/vibedock`（可通过 `VIBEDOCK_HOME` 定制），随时执行 `npm i -g vibedock` 升级 CLI 绝不覆盖线上数据。
 6. **安全最小权限与受控运维审批**
@@ -34,8 +37,10 @@
 # 1. 一键安装 Ubuntu 生产底座 (Node 22 / Caddy / PM2 / uv / SSHD / cron / 受限部署账号与 sudoers)
 sudo vibedock setup
 
-# 2. 交互式或非交互式初始化配置、随机数据库管理员密码、SSH 部署密钥对并烘焙 AI Skill 包
-sudo vibedock init [--yes] [--host 192.168.1.100] [--domain vd.example.com]
+# 2. 交互式或非交互式初始化配置、网关与数据库共存策略，并烘焙 AI Skill 包
+sudo vibedock init [--yes] [--host 192.168.1.100] [--domain vd.example.com] \
+  [--gateway-strategy reuse|dedicated-chain|dedicated-port|none] \
+  [--db-strategy dedicated|reuse]
 
 # 3. 签发 acme.sh (DNS-01) 泛域名 HTTPS 证书 (支持解析到内网 IP 的域名) 或绑定自定义证书
 sudo vibedock tls --dns <dnspod|aliyun|cf> --secret-id <ID> --secret-key <KEY>

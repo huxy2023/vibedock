@@ -226,13 +226,28 @@ export function createCatalogService(initialCatalog: CatalogData, options: Catal
     }
 
     const dbHost = cloned.environment?.address || options.dbHost || '127.0.0.1';
+    let dbAdminMap: Record<string, { host?: string; port?: number }> = {};
+    if (catalogFile) {
+      const adminPath = path.join(path.dirname(catalogFile), 'secrets', 'databases', 'admin.json');
+      if (fs.existsSync(adminPath)) {
+        try {
+          dbAdminMap = JSON.parse(fs.readFileSync(adminPath, 'utf8'));
+        } catch {
+          // Ignore malformed admin.json
+        }
+      }
+    }
     const databases = await Promise.all(
       SHARED_DATABASES.map(async (db) => {
-        const status = await checker({ host: '127.0.0.1', port: db.port });
+        const custom = dbAdminMap[db.id];
+        const targetPort = Number(custom?.port || db.port);
+        const targetHost = String(custom?.host || '127.0.0.1');
+        const status = await checker({ host: targetHost, port: targetPort });
         return {
           ...db,
+          port: targetPort,
           host: dbHost,
-          exampleUrl: db.exampleUrl.replace('<host>', dbHost),
+          exampleUrl: db.exampleUrl.replace('<host>', dbHost).replace(`:${db.port}`, `:${targetPort}`),
           online: Boolean(status?.online),
           checkedAt: status?.checkedAt,
         };

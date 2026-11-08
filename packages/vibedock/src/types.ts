@@ -1,5 +1,6 @@
 export type UserRole = 'admin' | 'member';
 export type DatabaseEngine = 'postgresql' | 'mysql' | 'mongodb' | 'redis';
+export type GatewayStrategy = 'reuse' | 'dedicated-chain' | 'dedicated-port' | 'none';
 
 export interface AppError extends Error {
   status?: number;
@@ -27,6 +28,9 @@ export interface VibeDockConfig {
   appPrefix: string;
   domainMode: 'nip' | 'letsencrypt' | 'custom';
   gateway?: 'caddy' | 'nginx' | 'none';
+  gatewayStrategy?: 'reuse' | 'dedicated-chain' | 'dedicated-port' | 'none';
+  gatewayHttpPort?: number;
+  gatewayHttpsPort?: number;
   primaryDomain: string;
   backupDomain: string;
   portalUrl: string;

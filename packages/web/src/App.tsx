@@ -12,19 +12,30 @@ import { UsersView } from './components/UsersView';
 
 function normalizeCatalogResponse(raw: any): CatalogResponse {
   const domainSuffix = raw?.environment?.domainSuffix || '127.0.0.1.nip.io';
+  const gwPort = Number(raw?.environment?.gatewayPort || 80);
+  const gwTlsPort = Number(raw?.environment?.gatewayTlsPort || 443);
+  const portSuffixFor = (s: string) =>
+    s === 'https'
+      ? gwTlsPort && gwTlsPort !== 443
+        ? `:${gwTlsPort}`
+        : ''
+      : gwPort && gwPort !== 80
+        ? `:${gwPort}`
+        : '';
   const projects: ProjectRecord[] = (raw?.projects || []).map((p: any) => {
     const firstRuleHost = p.ingressRules?.[0]?.match?.hosts?.[0];
     const domain = p.domain || firstRuleHost || `${p.id}.${domainSuffix}`;
     const scheme = p.ingressRules?.[0]?.match?.scheme || 'http';
-    const entryUrl = p.entryUrl || `${scheme}://${domain}`;
+    const entryUrl = p.entryUrl || `${scheme}://${domain}${portSuffixFor(scheme)}`;
     const routes =
       p.routes ||
       (p.ingressRules || []).map((r: any) => {
         const host = r.match?.hosts?.[0] || domain;
+        const rScheme = r.match?.scheme || 'http';
         const pathPart = (r.match?.paths?.[0] || '/').replace(/\*$/, '');
         return {
           label: r.name || r.id || '入口',
-          url: `${r.match?.scheme || 'http'}://${host}${pathPart}`,
+          url: `${rScheme}://${host}${portSuffixFor(rScheme)}${pathPart}`,
         };
       });
     const components = (p.components || []).map((c: any) => {
