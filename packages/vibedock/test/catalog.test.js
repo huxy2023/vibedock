@@ -10,8 +10,9 @@ import {
   validateCatalog,
 } from '../dist/services/catalog.js';
 import { buildNginxConfig } from '../dist/deploy/caddy.js';
-import { bindProjectDbs, formatDbEnv, provisionProjectDbs, registerDbInstance } from '../dist/deploy/databases.js';
+import { backupProjectDbs, bindProjectDbs, formatDbEnv, provisionProjectDbs, registerDbInstance } from '../dist/deploy/databases.js';
 import { publishApp } from '../dist/deploy/publish.js';
+import { buildActivateRemoteCmd, buildStartServiceRemoteCmd } from '../dist/skill/client.js';
 import { loadVibeDockConfig } from '../dist/config.js';
 
 function splitProjectCatalog() {
@@ -335,4 +336,88 @@ test('supports dedicated-port and dedicated-chain gateway strategies and side-by
   assert.equal(pgInfo.port, 45432);
   assert.equal(pgInfo.online, true);
   assert.match(pgInfo.exampleUrl, /:45432\//);
+});
+
+test('builds controlled start-service and activate commands and prunes expired database backups', (context) => {
+  const skillCfg = {
+    appsDir: '/var/lib/vibedock/apps',
+    appPrefix: 'vibe-',
+  };
+  const nodeCmd = buildStartServiceRemoteCmd(skillCfg, {
+    projectId: 'demo-app',
+    release: '20261108-1200',
+    component: 'api',
+    runtime: 'node',
+    entry: 'server.mjs',
+    port: 40005,
+  });
+  assert.match(nodeCmd, /db\.env/);
+  assert.match(nodeCmd, /PORT: String\(40005\)/);
+  assert.match(nodeCmd, /const procName = "vibe-demo-app-api"/);
+  assert.match(nodeCmd, /spawnSync\(.+pm2.+\[.+\bsave\b/);
+
+  const pyCmd = buildStartServiceRemoteCmd(skillCfg, {
+    projectId: 'demo-app',
+    release: '20261108-1200',
+    component: 'worker',
+    runtime: 'python',
+    entry: 'app.main:app',
+    port: 40006,
+  });
+  assert.match(pyCmd, /const procName = "vibe-demo-app-worker"/);
+  assert.match(pyCmd, /\.venv\/bin\/uvicorn/);
+
+  const actCmd = buildActivateRemoteCmd(skillCfg, 'demo-app', '20261108-1200');
+  assert.match(actCmd, /-sfn/);
+  assert.match(actCmd, /"20261108-1200"/);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibedock-backup-'));
+  context.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cfgFile = path.join(dir, 'vibedock.config.json');
+  fs.writeFileSync(
+    cfgFile,
+    JSON.stringify({
+      paths: {
+        dataDir: dir,
+        dbSecretsDir: path.join(dir, 'secrets/databases'),
+      },
+    }),
+  );
+  const cfg = loadVibeDockConfig(cfgFile);
+  bindProjectDbs(cfg, 'backup-demo', {
+    postgresql: 'postgresql://u:p@127.0.0.1:59999/demo_db',
+    mongodb: 'mongodb://u:p@127.0.0.1:59997/demo_mongo',
+  });
+
+  // Create an expired backup directory (10 days old)
+  const expiredDir = path.join(dir, 'backups/databases/20200101-000000');
+  fs.mkdirSync(expiredDir, { recursive: true });
+  const oldTime = new Date(Date.now() - 10 * 86400 * 1000);
+  fs.utimesSync(expiredDir, oldTime, oldTime);
+
+  const rawBinaryBytes = Buffer.from([0x00, 0xff, 0x80, 0x7f, 0xfe]);
+  const backupRes = backupProjectDbs(cfg, {
+    project: 'backup-demo',
+    keepDays: 7,
+    dumper: (proj, engine, entry) =>
+      engine === 'mongodb' ? rawBinaryBytes : `-- dump for ${proj} ${engine} ${entry.database}\n`,
+  });
+  assert.equal(backupRes.ok, true);
+  assert.equal(backupRes.files.length, 2);
+  const pgFile = backupRes.files.find((f) => f.endsWith('.sql'));
+  const mongoFile = backupRes.files.find((f) => f.endsWith('.archive'));
+  assert.match(fs.readFileSync(pgFile, 'utf8'), /-- dump for backup-demo postgresql demo_db/);
+  assert.deepEqual(fs.readFileSync(mongoFile), rawBinaryBytes);
+  assert.ok(fs.existsSync(path.join(backupRes.backupDir, 'manifest.json')));
+  assert.deepEqual(backupRes.prunedDirs, [expiredDir]);
+  assert.equal(fs.existsSync(expiredDir), false);
+
+  // Unreachable Redis backup must fail instead of returning fake metadata
+  bindProjectDbs(cfg, 'redis-fail-demo', {
+    redis: 'redis://:pass@127.0.0.1:59996/0',
+  });
+  const redisFailRes = backupProjectDbs(cfg, { project: 'redis-fail-demo' });
+  assert.equal(redisFailRes.ok, false);
+  assert.equal(redisFailRes.errors.length, 1);
+  assert.equal(redisFailRes.errors[0].engine, 'redis');
 });

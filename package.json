@@ -1,6 +1,6 @@
 {
   "name": "vibedock-monorepo",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "description": "VibeDock Monorepo — Self-Hosted AI-Native Team App & Database Cloud",
   "type": "module",

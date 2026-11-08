@@ -57,6 +57,7 @@ sudo vibedock db bind <project-id> --postgresql "postgres://..." # 为项目直�
 sudo vibedock db status                                        # 查看数据库状态、纳管模式与已开通项目列表
 sudo vibedock db provision <project-id> [--types all]          # 为指定项目幂等开通独立库与受限账号
 sudo vibedock db get <project-id> [--format json|env]          # 查看或导出项目的数据库连接串 (.env 格式)
+sudo vibedock db backup [project-id] [--keep-days 7]           # 按项目或全量导出数据库备份并清理过期备份
 sudo vibedock db down                                          # 停止内置共享数据库容器
 
 # 6. 应用槽位分配、发布、存量服务纳管与下架
@@ -81,8 +82,10 @@ node ~/.claude/skills/vibedock-deploy/scripts/client.mjs check
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs alloc my-app
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs db provision my-app --types postgresql,redis --format env
 
-# 3. 同步构建产物 (自动递归创建远端目录)、启动 PM2 进程并执行原子发布
+# 3. 同步构建产物 (自动递归创建远端目录)、受控启动 PM2 进程、切换软链并执行原子发布
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs upload ./dist /var/lib/vibedock/apps/my-app/releases/v1/web
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs start-service my-app --release v1 --runtime node --entry server.mjs --port 40001
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs activate my-app --release v1
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs publish ./publish.json
 
 # 4. 查看远程 PM2 进程日志或一键下架项目

@@ -4,9 +4,16 @@
 
 - **操作系统**：Ubuntu 22.04 / 24.04 LTS（生产服务端）或 macOS / Linux（本地开发）
 - **Node.js**：`>= 22.5.0`（使用内置 `node:sqlite`，零原生 C++ 编译依赖）
-- **生产底座组件**（由 `sudo vibedock setup` 一键自动检测与安装）：
-  - **智能网关适配**：若服务器已运行 `Nginx`，自动切换为非侵入式 **Nginx Drop-in 模式**（`/var/lib/vibedock/nginx/sites/*.conf`），不强装 Caddy、不抢占 80/443 端口；若为干净机器则自动安装配置 `Caddy`。
-  - **进程与运行时**：`PM2`、`uv`、`rsync`、`zip`、`cron`、`openssh-server`
+- **生产底座组件**（由 `sudo vibedock setup` 一键自动检测与安装，支持存量机器新旧并存与交互式策略选择）：
+  - **四档网关策略 (`--gateway-strategy`)**：
+    - `reuse`：复用宿主机已有 Nginx/Caddy（Drop-in `include /var/lib/vibedock/nginx/sites/*.conf;`）；
+    - `dedicated-chain`：保持存量 Nginx 监听 `:80/:443`，新建专用 Caddy 监听 `127.0.0.1:39080` 并由存量 Nginx 泛域名转发；
+    - `dedicated-port`：新建专用网关监听自定义端口（如 `:8080/:8443`），与存量网关彻底解耦；
+    - `none`：仅使用门户直连端口（`39090`），不接管反向代理。
+  - **双档数据库策略 (`--db-strategy`)**：
+    - `dedicated`：新建 VibeDock 专属 Docker 数据库栈（若默认端口 `5432/3306/27017/6379` 已被占用，自动避让至 `45432/43306/47017/46379`）；
+    - `reuse`：通过 `vibedock db register` / `db bind` 直接复用宿主机存量数据库或云 RDS。
+  - **进程与运行时**：`PM2`（门户与部署应用各自独立 `PM2_HOME`，绝不污染宿主机 `root` 默认进程列表）、`uv`、`rsync`、`zip`、`cron`、`openssh-server`
 
 ---
 

@@ -31,8 +31,11 @@ vibedock/
 ├── certs/                     # 泛域名/自定义 TLS 证书 (0644) 与私钥 (0640 root:caddy, 目录 0750)
 ├── acme/                      # acme.sh 客户端、CA 账户与自动续期配置 (0700)
 ├── caddy/sites/               # Caddy 动态导入的门户与应用路由配置 (*.caddy)
+├── nginx/sites/               # Nginx Drop-in / Chain 路由配置 (*.conf)
 ├── secrets/databases/         # 数据库管理员与各项目隔离凭据 (0700)
 ├── databases/                 # 共享数据库持久化卷与 .env.db (0600)
+├── backups/databases/         # 按时间戳归档的项目数据库备份与 manifest.json (0700)
+├── pm2/                       # vibedock-portal 专属隔离 PM2_HOME (0700)
 ├── apps/                      # 团队已发布的全部应用代码与软链 (/var/lib/vibedock/apps/<id>)
 └── deploy/                    # 受限部署账号 vibe-deploy 家目录 (.ssh 与 .pm2)
 ```

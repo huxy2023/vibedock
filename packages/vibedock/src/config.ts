@@ -77,6 +77,7 @@ export function loadVibeDockConfig(customPath?: string): VibeDockConfig {
     primaryDomain,
     backupDomain,
     portalUrl: process.env.VIBEDOCK_PORTAL_URL || raw.portalUrl || 'http://127.0.0.1:39090',
+    deployToken: process.env.VIBEDOCK_DEPLOY_TOKEN || raw.deployToken || '',
     tls: {
       certFile: process.env.VIBEDOCK_TLS_CERT || raw.tls?.certFile || '',
       keyFile: process.env.VIBEDOCK_TLS_KEY || raw.tls?.keyFile || '',

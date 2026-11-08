@@ -17,18 +17,24 @@ node ~/.claude/skills/vibedock-deploy/scripts/client.mjs db provision my-app --t
 # 4. 上传构建产物 (自动在远端创建目标目录，且目录上传自动对齐内容不额外嵌套)
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs upload ./dist /var/lib/vibedock/apps/my-app/releases/v1/web
 
-# 5. 在受限账号下启动/更新 PM2 守护进程并切换 current 软链
-node ~/.claude/skills/vibedock-deploy/scripts/client.mjs exec 'ln -sfn /var/lib/vibedock/apps/my-app/releases/v1 /var/lib/vibedock/apps/my-app/current'
+# 5. 在受限账号下受控启动/更新 PM2 守护进程（自动加载 secrets/db.env）并切换 current 软链
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs start-service my-app --release v1 --runtime node --entry server.mjs --port 40001
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs activate my-app --release v1
 
 # 6. 提交 publish.json 原子生成 Caddy/Nginx 路由、挂载 HTTPS 证书并登记门户卡片
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs publish ./publish.json
 
-# 6b. 或一键纳管宿主机/内网已运行的存量服务 (无需上传代码目录，直接分配子域名与门户卡片)
+# 6b. 或一键纳管宿主机/内网已运行服务或 Docker 容器项目 (无需上传代码目录，直接分配子域名与门户卡片)
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs adopt legacy-erp --upstream http://127.0.0.1:18080 --name "存量 ERP 系统"
 
 # 7. 查看远程 PM2 日志或一键下架应用
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs logs my-app --lines 80
 node ~/.claude/skills/vibedock-deploy/scripts/client.mjs unpublish my-app
+
+# 8. [双路径 Backup 兜底] 当 SSH 22 端口受阻时，自动回退或显式使用 --http / MCP 通道（基于 access/server.json 内置 deployToken 鉴权）
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs alloc my-app --http
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs upload ./dist /var/lib/vibedock/apps/my-app/releases/v1/web --http
+node ~/.claude/skills/vibedock-deploy/scripts/client.mjs mcp
 ```
 
 ---

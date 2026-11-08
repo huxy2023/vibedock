@@ -34,6 +34,7 @@ export interface VibeDockConfig {
   primaryDomain: string;
   backupDomain: string;
   portalUrl: string;
+  deployToken?: string;
   tls?: {
     certFile?: string;
     keyFile?: string;
@@ -235,6 +236,7 @@ export interface PublishManifest {
   id: string;
   name?: string;
   title?: string;
+  category?: string;
   owner: string;
   description: string;
   tags?: string[];

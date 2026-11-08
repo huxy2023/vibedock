@@ -73,7 +73,7 @@ export function readJsonFile<T>(filePath: string, fallback: T): T {
   }
 }
 
-export function writeFileAtomic(targetPath: string, content: string, mode = 0o644): void {
+export function writeFileAtomic(targetPath: string, content: string | Buffer, mode = 0o644): void {
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmpPath, content, { mode });

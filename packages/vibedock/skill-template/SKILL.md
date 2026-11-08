@@ -34,13 +34,22 @@ node scripts/client.mjs db status
 node scripts/client.mjs db provision <id> --types postgresql,redis
 node scripts/client.mjs db bind <id> --postgresql "postgresql://user:pass@host:5432/db"
 
-# 4. 查看项目 PM2 进程状态与最近日志
+# 4. 受控启动/更新 PM2 服务并切换 current 软链
+node scripts/client.mjs start-service <id> --release <release-id> --runtime node --entry server.mjs --port 40001
+node scripts/client.mjs activate <id> --release <release-id>
+
+# 5. 查看项目 PM2 进程状态与最近日志
 node scripts/client.mjs logs <id> --lines 60
 
-# 5. 发布应用、纳管已有内网/本机端口服务（adopt）或下线应用（unpublish）
+# 6. 发布应用、纳管已有内网/本机端口或 Docker 容器服务（adopt）或下线应用（unpublish）
 node scripts/client.mjs publish /path/to/publish.json
 node scripts/client.mjs adopt <id> --upstream http://127.0.0.1:8080 --name "已有服务名称"
 node scripts/client.mjs unpublish <id>
+
+# [备用通道] 当本机 SSH/22 端口受限或 Windows 缺 rsync 时，自动或加 --http 走服务端受控 HTTP/MCP 通道（内置 deployToken 鉴权）
+node scripts/client.mjs alloc <id> --http
+node scripts/client.mjs upload ./dist {{APPS_DIR}}/<id>/releases/<release-id>/web --http
+node scripts/client.mjs mcp
 ```
 
 执行前请阅读 [references/deploy.md](references/deploy.md)；若项目使用数据库，同时阅读 [references/database.md](references/database.md)。
@@ -50,7 +59,7 @@ node scripts/client.mjs unpublish <id>
 1. 检查本地项目结构与技术栈（Static / Node.js / Python `uv` / Go）及所需数据库。
 2. 运行 `node scripts/client.mjs alloc <id>` 获取推荐空闲端口 `recommendedPort`。
 3. 如需数据库，运行 `node scripts/client.mjs db provision <id> --types ...` 并将环境变量写入 `{{APPS_DIR}}/<id>/secrets/db.env`（权限 `600`）。
-4. 上传构建产物或源码至 `{{APPS_DIR}}/<id>/releases/<release-id>/`，并在服务器端完成依赖安装（Node `npm ci` / Python `uv sync`；Go 在本地交叉编译为 Linux 单二进制后直接上传）。
-5. 启动或更新具名 PM2 进程 `{{APP_PREFIX}}<id>-<component>`（监听 `127.0.0.1:<port>`）并执行 `pm2 save`。
-6. 原子切换 `{{APPS_DIR}}/<id>/current` 软链，生成 `publish.json` 并调用 `node scripts/client.mjs publish` 完成域名与门户登记。
+4. 上传构建产物或源码至 `{{APPS_DIR}}/<id>/releases/<release-id>/`，并在服务器端完成依赖安装（Node `npm ci` / Python `uv sync`；Go 在本地交叉编译为 Linux 单二进制后直接上传；Docker 容器项目直接绑定 `127.0.0.1:<port>`）。
+5. 运行 `node scripts/client.mjs start-service <id> ...` 受控启动或更新具名 PM2 进程 `{{APP_PREFIX}}<id>-<component>`（自动加载 `secrets/db.env`、监听 `127.0.0.1:<port>` 并执行 `pm2 save`）。
+6. 运行 `node scripts/client.mjs activate <id> --release <release-id>` 原子切换 `{{APPS_DIR}}/<id>/current` 软链，生成 `publish.json` 并调用 `node scripts/client.mjs publish` 完成域名与门户登记。
 7. 验证内部健康检查、线上访问地址（`{{PRIMARY_DOMAIN}}`）及门户（`{{PORTAL_URL}}`）展示状态。

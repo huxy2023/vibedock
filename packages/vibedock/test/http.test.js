@@ -191,3 +191,193 @@ test('DX manifest contract, publishApp rollback, and withFileLock mutual exclusi
     );
   });
 });
+
+test('Server MCP endpoint and HTTP upload backup path enforce deployToken auth and execute tools safely', async (context) => {
+  const { spawnSync } = await import('node:child_process');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibedock-mcp-'));
+  context.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const dataDir = path.join(tmpDir, 'data');
+  const appsDir = path.join(tmpDir, 'apps');
+  const sitesDir = path.join(tmpDir, 'sites');
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(sitesDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'catalog.json'), JSON.stringify({ projects: [] }, null, 2));
+
+  const cfg = loadVibeDockConfig();
+  cfg.deployToken = 'vd_test_secret_token_123456';
+  cfg.paths.dataDir = dataDir;
+  cfg.paths.appsDir = appsDir;
+  cfg.paths.caddySitesDir = sitesDir;
+  cfg.paths.caddyConfig = path.join(tmpDir, 'nonexistent-Caddyfile');
+  cfg.paths.dbSecretsDir = path.join(dataDir, 'secrets/databases');
+
+  const { app, close } = createApp({
+    vibeConfig: cfg,
+    catalogFile: path.join(dataDir, 'catalog.json'),
+    authDbFile: path.join(tmpDir, 'auth.sqlite3'),
+    chatDbFile: path.join(tmpDir, 'chat.sqlite3'),
+  });
+  context.after(() => close());
+
+  // 1. Rejects unauthenticated or wrong-token requests to /api/mcp and /api/dx/upload
+  const unauthMcp = await app.request('/api/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wrong_token' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+  });
+  assert.equal(unauthMcp.status, 401);
+
+  const unauthUpload = await app.request('/api/dx/upload?project=mcp-app&release=v1', {
+    method: 'POST',
+    body: Buffer.from('test'),
+  });
+  assert.equal(unauthUpload.status, 401);
+
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${cfg.deployToken}`,
+  };
+
+  // 2. MCP initialize & tools/list
+  const initRes = await app.request('/api/mcp', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+  });
+  assert.equal(initRes.status, 200);
+  const initBody = await initRes.json();
+  assert.equal(initBody.result.serverInfo.name, 'vibedock-mcp');
+
+  const listRes = await app.request('/api/mcp', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+  });
+  const listBody = await listRes.json();
+  const toolNames = listBody.result.tools.map((t) => t.name);
+  assert.ok(toolNames.includes('vibedock_alloc'));
+  assert.ok(toolNames.includes('vibedock_db_bind'));
+  assert.ok(toolNames.includes('vibedock_adopt'));
+  assert.ok(toolNames.includes('vibedock_start_service'));
+
+  // 3. MCP tools/call: vibedock_alloc, vibedock_db_bind (writes secrets/db.env), and vibedock_adopt
+  const allocRes = await app.request('/api/mcp', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'vibedock_alloc', arguments: { projectId: 'mcp-app' } },
+    }),
+  });
+  const allocBody = await allocRes.json();
+  assert.equal(allocBody.result.structuredContent.projectId, 'team-mcp-app');
+  assert.equal(allocBody.result.structuredContent.recommendedPort, 40000);
+
+  const bindRes = await app.request('/api/mcp', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: {
+        name: 'vibedock_db_bind',
+        arguments: {
+          projectId: 'mcp-app',
+          postgresql: 'postgresql://u:p@127.0.0.1:5432/mcp_db',
+        },
+      },
+    }),
+  });
+  const bindBody = await bindRes.json();
+  assert.equal(bindBody.result.structuredContent.ok, true);
+  const dbEnvPath = path.join(appsDir, 'mcp-app', 'secrets', 'db.env');
+  assert.ok(fs.existsSync(dbEnvPath));
+  assert.match(fs.readFileSync(dbEnvPath, 'utf8'), /POSTGRES_URL="postgresql:\/\/u:p@127\.0\.0\.1:5432\/mcp_db"/);
+
+  const adoptRes = await app.request('/api/mcp', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: {
+        name: 'vibedock_adopt',
+        arguments: { id: 'mcp-app', upstream: 'http://127.0.0.1:18088', name: 'MCP Adopted Service' },
+      },
+    }),
+  });
+  const adoptBody = await adoptRes.json();
+  assert.equal(adoptBody.result.structuredContent.projectId, 'team-mcp-app');
+
+  // 4. HTTP upload backup path extracts tarball and rejects path traversal
+  const traversalRes = await app.request('/api/dx/upload?project=mcp-app&release=v1&subpath=../../etc', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.deployToken}` },
+    body: Buffer.from('bad'),
+  });
+  assert.equal(traversalRes.status, 400);
+
+  const srcDir = path.join(tmpDir, 'src-web');
+  fs.mkdirSync(srcDir, { recursive: true });
+  fs.writeFileSync(path.join(srcDir, 'index.html'), '<h1>Uploaded via HTTP</h1>');
+  const tarFile = path.join(tmpDir, 'web.tar.gz');
+  spawnSync('tar', ['-czf', tarFile, '-C', srcDir, '.']);
+
+  const uploadRes = await app.request('/api/dx/upload?project=mcp-app&release=v1&subpath=web', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.deployToken}` },
+    body: fs.readFileSync(tarFile),
+  });
+  assert.equal(uploadRes.status, 200);
+  const extractedHtml = path.join(appsDir, 'mcp-app', 'releases', 'v1', 'web', 'index.html');
+  assert.equal(fs.readFileSync(extractedHtml, 'utf8'), '<h1>Uploaded via HTTP</h1>');
+
+  // 5. Rejects archives containing symbolic links and rejects symlink subpath escapes
+  const symSrcDir = path.join(tmpDir, 'src-symlink');
+  fs.mkdirSync(symSrcDir, { recursive: true });
+  fs.symlinkSync(tmpDir, path.join(symSrcDir, 'jump'));
+  const symTarFile = path.join(tmpDir, 'symlink.tar.gz');
+  spawnSync('tar', ['-czf', symTarFile, '-C', symSrcDir, '.']);
+
+  const symUploadRes = await app.request('/api/dx/upload?project=mcp-app&release=v1', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.deployToken}` },
+    body: fs.readFileSync(symTarFile),
+  });
+  assert.equal(symUploadRes.status, 400);
+
+  fs.symlinkSync(tmpDir, path.join(appsDir, 'mcp-app', 'releases', 'v1', 'manual-jump'));
+  const escapeSubpathRes = await app.request('/api/dx/upload?project=mcp-app&release=v1&subpath=manual-jump', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.deployToken}` },
+    body: fs.readFileSync(tarFile),
+  });
+  assert.equal(escapeSubpathRes.status, 400);
+
+  // Rejects when release directory itself is a symlink or destination file is a symlink
+  fs.symlinkSync(tmpDir, path.join(appsDir, 'mcp-app', 'releases', 'v2-sym'));
+  const symReleaseRes = await app.request('/api/dx/upload?project=mcp-app&release=v2-sym', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.deployToken}` },
+    body: fs.readFileSync(tarFile),
+  });
+  assert.equal(symReleaseRes.status, 400);
+
+  const outsideFile = path.join(tmpDir, 'outside-sentinel.txt');
+  fs.writeFileSync(outsideFile, 'DO_NOT_OVERWRITE');
+  const v3WebDir = path.join(appsDir, 'mcp-app', 'releases', 'v3', 'web');
+  fs.mkdirSync(v3WebDir, { recursive: true });
+  fs.symlinkSync(outsideFile, path.join(v3WebDir, 'index.html'));
+  const symDestFileRes = await app.request('/api/dx/upload?project=mcp-app&release=v3&subpath=web', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.deployToken}` },
+    body: fs.readFileSync(tarFile),
+  });
+  assert.equal(symDestFileRes.status, 400);
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'DO_NOT_OVERWRITE');
+});

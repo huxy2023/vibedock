@@ -5,6 +5,7 @@ import { loadVibeDockConfig, PROJECT_ROOT } from './config.js';
 import { createAssistantRoutes } from './http/assistant.js';
 import { createAuthRoutes } from './http/auth.js';
 import { createCatalogRoutes } from './http/catalog.js';
+import { createMcpRoutes } from './http/mcp.js';
 import { createAuthMiddleware, securityHeaders, type AppEnv } from './http/middleware.js';
 import { createOperationsRoutes } from './http/operations.js';
 import { createOperationsService } from './services/actions.js';
@@ -141,6 +142,12 @@ export function createApp(options: CreateAppOptions = {}) {
     createOperationsRoutes({
       operationsService,
       aiConfigService,
+    }),
+  );
+  app.route(
+    '/api',
+    createMcpRoutes({
+      vibeConfig,
     }),
   );
 

@@ -56,3 +56,17 @@ MONGODB_URL="mongodb://vibe_my_app:xxxx@127.0.0.1:27017/vibe_my_app?authSource=v
 REDIS_URL="redis://vibe_my_app:xxxx@127.0.0.1:6379"
 REDIS_KEY_PREFIX="vibe_my_app:"
 ```
+
+---
+
+## 3. 按项目数据库备份与自动保留期清理 (`vibedock db backup`)
+
+VibeDock 内置按项目或全量的数据库导出备份命令，自动将 PostgreSQL (`.sql`)、MySQL (`.sql`)、MongoDB (`.archive.gz`) 与 Redis (`dump.rdb`) 备份至 `/var/lib/vibedock/backups/databases/<timestamp>/`（权限 `0600`）并自动清理过期备份：
+
+```bash
+# 备份全部已开通数据库的项目（默认保留最近 7 天）
+sudo vibedock db backup
+
+# 仅备份指定项目并保留最近 14 天
+sudo vibedock db backup my-app --keep-days 14
+```

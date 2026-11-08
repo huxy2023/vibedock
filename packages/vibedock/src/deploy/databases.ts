@@ -102,6 +102,52 @@ function runClientCmd(
   throw new Error(`未检测到客户端工具 "${bin}"，请先安装对应客户端或使用 "vibedock db bind" 直接绑定现成连接串`);
 }
 
+function runDockerExecBuffer(container: string, args: string[]): Buffer {
+  if (!isContainerRunning(container)) {
+    throw new Error(`Docker 数据库容器 ${container} 未启动，请先执行 "vibedock db up" 或使用 "vibedock db register" 接入已有数据库`);
+  }
+  const res = spawnSync('docker', ['exec', container, ...args], {
+    timeout: 15000,
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  if (res.status !== 0) {
+    throw new Error(((res.stderr && res.stderr.toString('utf8')) || (res.stdout && res.stdout.toString('utf8')) || `${container} command failed`).trim());
+  }
+  return Buffer.from(res.stdout || []);
+}
+
+function runClientCmdBuffer(
+  bin: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; dockerImage?: string } = {},
+): Buffer {
+  const hasLocalBin = spawnSync('which', [bin], { encoding: 'utf8' }).status === 0;
+  if (hasLocalBin) {
+    const res = spawnSync(bin, args, {
+      env: { ...process.env, ...(options.env || {}) },
+      timeout: 15000,
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    if (res.status !== 0) {
+      throw new Error(((res.stderr && res.stderr.toString('utf8')) || (res.stdout && res.stdout.toString('utf8')) || `${bin} command failed`).trim());
+    }
+    return Buffer.from(res.stdout || []);
+  }
+  if (options.dockerImage) {
+    const envArgs = Object.entries(options.env || {}).flatMap(([k, v]) => (v !== undefined ? ['-e', `${k}=${v}`] : []));
+    const dArgs = ['run', '--rm', '--network', 'host', ...envArgs, options.dockerImage, bin, ...args];
+    const res = spawnSync('docker', dArgs, {
+      timeout: 20000,
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    if (res.status !== 0) {
+      throw new Error(((res.stderr && res.stderr.toString('utf8')) || (res.stdout && res.stdout.toString('utf8')) || `${bin} via docker failed`).trim());
+    }
+    return Buffer.from(res.stdout || []);
+  }
+  throw new Error(`未检测到客户端工具 "${bin}"，请先安装对应客户端或使用 "vibedock db bind" 直接绑定现成连接串`);
+}
+
 function resolveTargetHost(cfg: VibeDockConfig, adminHost?: string, useDocker = true): string {
   const h = String(adminHost || '127.0.0.1').trim();
   if (!useDocker) return h;
@@ -473,4 +519,194 @@ export function verifyProjectDbRecord(cfg: VibeDockConfig, rawProject: string) {
     checks[key] = { ok: Boolean(entry?.url), envKey: entry?.envKey || '' };
   }
   return { project: record.project, checks };
+}
+
+export function backupProjectDbs(
+  cfg: VibeDockConfig,
+  options: {
+    project?: string;
+    keepDays?: number;
+    dumper?: (project: string, engine: string, entry: ProvisionedDbEntry) => string | Buffer;
+  } = {},
+) {
+  const projectsDir = path.join(cfg.paths.dbSecretsDir, 'projects');
+  const backupsRoot = path.join(cfg.paths.dataDir, 'backups', 'databases');
+  fs.mkdirSync(backupsRoot, { recursive: true, mode: 0o700 });
+
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(backupsRoot, timestamp);
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+
+  let admin: Record<string, any> = {};
+  try {
+    admin = loadAdminCreds(cfg);
+  } catch {
+    // Allow backup of bound project records even if admin.json does not exist yet
+  }
+
+  const projectFiles = options.project
+    ? [`${normalizeProject(options.project)}.json`]
+    : fs.existsSync(projectsDir)
+      ? fs.readdirSync(projectsDir).filter((f) => f.endsWith('.json')).sort()
+      : [];
+
+  const files: string[] = [];
+  const errors: Array<{ project: string; engine: string; error: string }> = [];
+
+  for (const file of projectFiles) {
+    const fullPath = path.join(projectsDir, file);
+    if (!fs.existsSync(fullPath)) continue;
+    const record = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+    const proj = String(record.project || file.replace(/\.json$/, ''));
+    for (const [engine, entry] of Object.entries(record.databases || {}) as Array<[string, ProvisionedDbEntry]>) {
+      if (!entry) continue;
+      try {
+        let dumpContent: string | Buffer = '';
+        let ext = 'sql';
+        if (options.dumper) {
+          dumpContent = options.dumper(proj, engine, entry);
+          ext = engine === 'mongodb' ? 'archive' : engine === 'redis' ? 'json' : 'sql';
+        } else if (engine === 'postgresql') {
+          const pgAdmin = admin.postgresql || {};
+          const useDocker = !entry.bound && pgAdmin.mode !== 'external' && isContainerRunning('vibedock-postgres');
+          dumpContent = useDocker
+            ? runDockerExec('vibedock-postgres', ['pg_dump', '-U', pgAdmin.user || 'postgres', entry.database])
+            : runClientCmd(
+                'pg_dump',
+                ['-h', entry.host, '-p', String(entry.port), '-U', entry.username || pgAdmin.user || 'postgres', entry.database],
+                { env: { PGPASSWORD: entry.password || pgAdmin.password || '' }, dockerImage: 'postgres:16-alpine' },
+              );
+        } else if (engine === 'mysql') {
+          const myAdmin = admin.mysql || {};
+          const useDocker = !entry.bound && myAdmin.mode !== 'external' && isContainerRunning('vibedock-mysql');
+          dumpContent = useDocker
+            ? runDockerExec('vibedock-mysql', [
+                'mysqldump',
+                '-u',
+                myAdmin.user || 'root',
+                `-p${myAdmin.password || ''}`,
+                '--single-transaction',
+                entry.database,
+              ])
+            : runClientCmd(
+                'mysqldump',
+                ['-h', entry.host, '-P', String(entry.port), '-u', entry.username || myAdmin.user || 'root', '--single-transaction', entry.database],
+                { env: { MYSQL_PWD: entry.password || myAdmin.password || '' }, dockerImage: 'mysql:8.0' },
+              );
+        } else if (engine === 'mongodb') {
+          ext = 'archive';
+          const mgAdmin = admin.mongodb || {};
+          const useDocker = !entry.bound && mgAdmin.mode !== 'external' && isContainerRunning('vibedock-mongodb');
+          dumpContent = useDocker
+            ? runDockerExecBuffer('vibedock-mongodb', ['mongodump', `--uri=${entry.url}`, '--archive', '--quiet'])
+            : runClientCmdBuffer('mongodump', [`--uri=${entry.url}`, '--archive', '--quiet'], { dockerImage: 'mongo:8.0' });
+        } else if (engine === 'redis') {
+          ext = 'json';
+          const rdAdmin = admin.redis || {};
+          const useDocker = !entry.bound && rdAdmin.mode !== 'external' && isContainerRunning('vibedock-redis');
+          const keyPattern = entry.keyPrefix || `${proj}:*`;
+          const luaScript = [
+            'local cursor = "0"',
+            'local pattern = ARGV[1]',
+            'local items = {}',
+            'repeat',
+            '  local res = redis.call("SCAN", cursor, "MATCH", pattern, "COUNT", 500)',
+            '  cursor = res[1]',
+            '  for _, k in ipairs(res[2]) do',
+            '    local pttl = redis.call("PTTL", k)',
+            '    if pttl < 0 then pttl = 0 end',
+            '    local raw = redis.call("DUMP", k)',
+            '    if raw then',
+            '      local hex = string.gsub(raw, ".", function(c) return string.format("%02x", string.byte(c)) end)',
+            '      table.insert(items, { key = k, pttl = pttl, dumpHex = hex })',
+            '    end',
+            '  end',
+            'until cursor == "0"',
+            'return cjson.encode(items)',
+          ].join('\n');
+          const dbIndexArg =
+            entry.database !== undefined && /^\d+$/.test(String(entry.database).trim())
+              ? ['-n', String(entry.database).trim()]
+              : [];
+          const rawJson = useDocker
+            ? runDockerExec('vibedock-redis', [
+                'redis-cli',
+                '--no-auth-warning',
+                ...dbIndexArg,
+                ...(rdAdmin.password ? ['-a', rdAdmin.password] : []),
+                '--raw',
+                'EVAL',
+                luaScript,
+                '0',
+                keyPattern,
+              ])
+            : runClientCmd(
+                'redis-cli',
+                [
+                  '--no-auth-warning',
+                  '-h',
+                  entry.host || rdAdmin.host || '127.0.0.1',
+                  '-p',
+                  String(entry.port || rdAdmin.port || 6379),
+                  ...dbIndexArg,
+                  ...(entry.username && entry.username !== 'default' ? ['--user', entry.username] : []),
+                  ...(entry.password || rdAdmin.password ? ['-a', entry.password || rdAdmin.password] : []),
+                  '--raw',
+                  'EVAL',
+                  luaScript,
+                  '0',
+                  keyPattern,
+                ],
+                { dockerImage: 'redis:7.2-alpine' },
+              );
+          const parsedKeys = JSON.parse((rawJson || '[]').trim() || '[]');
+          const keys = Array.isArray(parsedKeys) ? parsedKeys : [];
+          dumpContent = `${JSON.stringify(
+            { project: proj, engine: 'redis', keyPrefix: keyPattern, backedUpAt: now.toISOString(), keys },
+            null,
+            2,
+          )}\n`;
+        }
+        const outFile = path.join(backupDir, `${proj}-${engine}.${ext}`);
+        writeFileAtomic(outFile, dumpContent, 0o600);
+        files.push(outFile);
+      } catch (err: any) {
+        errors.push({ project: proj, engine, error: err?.message || String(err) });
+      }
+    }
+  }
+
+  const manifestFile = path.join(backupDir, 'manifest.json');
+  writeFileAtomic(
+    manifestFile,
+    `${JSON.stringify({ timestamp, createdAt: now.toISOString(), files, errors }, null, 2)}\n`,
+    0o600,
+  );
+
+  const keepDays = Number.isFinite(options.keepDays) ? Math.max(1, Number(options.keepDays)) : 7;
+  const cutoffMs = now.getTime() - keepDays * 86_400_000;
+  const prunedDirs: string[] = [];
+  for (const name of fs.readdirSync(backupsRoot)) {
+    const candidate = path.join(backupsRoot, name);
+    if (candidate === backupDir) continue;
+    try {
+      const st = fs.statSync(candidate);
+      if (st.isDirectory() && st.mtimeMs < cutoffMs) {
+        fs.rmSync(candidate, { recursive: true, force: true });
+        prunedDirs.push(candidate);
+      }
+    } catch {
+      // Ignore concurrent deletion
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    backupDir,
+    timestamp,
+    files,
+    prunedDirs,
+    errors,
+  };
 }

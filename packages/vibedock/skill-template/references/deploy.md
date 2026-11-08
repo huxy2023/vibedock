@@ -29,18 +29,19 @@ node scripts/client.mjs alloc <id>
 node scripts/client.mjs upload ./dist {{APPS_DIR}}/demo/releases/v1/web
 ```
 
-## 3. 启动后端服务（Node.js / Python `uv` / Go 通用端口契约）
+## 3. 启动后端服务与原子切换 `current`（Node.js / Python `uv` / Go / Docker）
 
 所有后端服务统一遵循：**监听 `127.0.0.1:<port>`，由 PM2 以 `{{APP_PREFIX}}<id>-<component>` 进程名守护**。
+推荐使用受控命令 `start-service`（自动完成：**切换 `current` 软链 + 安装生产依赖 + 注入 `secrets/db.env` + 启动/重启 PM2 进程 + `pm2 save`**）：
 
 ### 方式 A：Node.js 服务
 ```bash
-node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && ( [ ! -f package.json ] || npm ci --omit=dev ) && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && HOST=127.0.0.1 PORT=40001 NODE_ENV=production pm2 start server.mjs --name {{APP_PREFIX}}demo-api && pm2 save'
+node scripts/client.mjs start-service demo --release v1 --entry server.mjs --port 40001 --runtime node
 ```
 
-### 方式 B：Python 服务（推荐使用 `uv`）
+### 方式 B：Python 服务（自动调用 `uv sync` 并通过 `.venv` 启动）
 ```bash
-node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && uv sync && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && pm2 start .venv/bin/uvicorn --name {{APP_PREFIX}}demo-api --interpreter none -- main:app --host 127.0.0.1 --port 40001 && pm2 save'
+node scripts/client.mjs start-service demo --release v1 --entry main:app --port 40001 --runtime python
 ```
 
 ### 方式 C：Go 服务（本地交叉编译为 Linux 单二进制文件后上传）
@@ -51,13 +52,19 @@ GOARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "amd64")
 CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH go build -o ./dist-api/app .
 node scripts/client.mjs upload ./dist-api {{APPS_DIR}}/demo/releases/v1/api
 
-# 2. 在服务器端赋权并交由 PM2 守护启动
-node scripts/client.mjs exec 'cd {{APPS_DIR}}/demo/releases/v1/api && chmod +x ./app && if [ -f {{APPS_DIR}}/demo/secrets/db.env ]; then set -a; . {{APPS_DIR}}/demo/secrets/db.env; set +a; fi && HOST=127.0.0.1 PORT=40001 pm2 start ./app --name {{APP_PREFIX}}demo-api && pm2 save'
+# 2. 自动赋权、注入 db.env、切换 current 并交由 PM2 守护启动
+node scripts/client.mjs start-service demo --release v1 --entry ./app --port 40001 --runtime go
 ```
 
-切换 `current` 软链：
+### 方式 D：Docker / Docker Compose 容器项目
+若项目本身以容器运行，先通过 `alloc` 获取空闲端口（如 `40001`），将容器端口绑定在 `127.0.0.1:40001:<容器端口>` 启动后，直接执行 `adopt` 或 `publish` 挂载子域名与门户卡片：
 ```bash
-node scripts/client.mjs exec 'ln -sfn {{APPS_DIR}}/demo/releases/v1 {{APPS_DIR}}/demo/current'
+node scripts/client.mjs adopt demo --upstream http://127.0.0.1:40001 --name "容器应用"
+```
+
+纯静态站点（无后端进程）仅需原子切换 `current` 软链：
+```bash
+node scripts/client.mjs activate demo --release v1
 ```
 
 查看 PM2 状态与最近日志：

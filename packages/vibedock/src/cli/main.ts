@@ -10,6 +10,7 @@ import readline from 'node:readline/promises';
 import { loadVibeDockConfig, PROJECT_ROOT, resolveStateRoot } from '../config.js';
 import { createAuthService } from '../services/auth.js';
 import {
+  backupProjectDbs,
   bindProjectDbs,
   formatDbEnv,
   getDbStatus,
@@ -269,6 +270,21 @@ export function packSkill(cfg: VibeDockConfig) {
   fs.chmodSync(path.join(targetDir, 'access/deploy_key'), 0o600);
   fs.writeFileSync(path.join(targetDir, 'access/known_hosts'), '', { mode: 0o600 });
 
+  let deployToken = cfg.deployToken || '';
+  if (!deployToken) {
+    deployToken = `vd_${crypto.randomBytes(24).toString('hex')}`;
+    cfg.deployToken = deployToken;
+    if (cfg.configPath && fs.existsSync(cfg.configPath)) {
+      try {
+        const rawCfg = JSON.parse(fs.readFileSync(cfg.configPath, 'utf8'));
+        rawCfg.deployToken = deployToken;
+        fs.writeFileSync(cfg.configPath, `${JSON.stringify(rawCfg, null, 2)}\n`, { mode: 0o600 });
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
   const serverJson = {
     brandName: cfg.brandName,
     skillName,
@@ -278,6 +294,8 @@ export function packSkill(cfg: VibeDockConfig) {
     appPrefix: cfg.appPrefix,
     appsDir: cfg.paths.appsDir,
     portalUrl: cfg.portalUrl,
+    mcpUrl: `${cfg.portalUrl.replace(/\/+$/, '')}/api/mcp`,
+    deployToken,
     publishCommand: 'sudo -n /usr/local/bin/vibedock-publish',
     dbCommand: 'sudo -n /usr/local/bin/vibedock-db-provision',
   };
@@ -734,6 +752,7 @@ async function cmdInit(flags: ParsedFlags): Promise<void> {
     primaryDomain,
     backupDomain,
     portalUrl: `${portalScheme}://portal.${primaryDomain}${portalPortSuffix}`,
+    deployToken: `vd_${crypto.randomBytes(24).toString('hex')}`,
     tls: {
       certFile: tlsCert,
       keyFile: tlsKey,
@@ -990,6 +1009,15 @@ async function cmdDb(sub: string, flags: ParsedFlags): Promise<void> {
     } else {
       console.log(JSON.stringify({ ok: true, result: record }, null, 2));
     }
+    return;
+  }
+
+  if (sub === 'backup') {
+    const project = flags._[2] ? String(flags._[2]) : undefined;
+    const keepDays = flags['keep-days'] ? Number(flags['keep-days']) : 7;
+    const result = backupProjectDbs(cfg, { project, keepDays });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exit(1);
     return;
   }
 
@@ -1403,17 +1431,24 @@ function cmdSetup(): void {
 }
 
 function cmdStart(flags: ParsedFlags): void {
+  const cfg = loadVibeDockConfig();
   const serverEntry = path.join(PROJECT_ROOT, 'dist', 'server.js');
+  const portalPm2Home = path.join(cfg.paths.dataDir, 'pm2');
+  fs.mkdirSync(portalPm2Home, { recursive: true, mode: 0o700 });
+  const env = { ...process.env, PM2_HOME: portalPm2Home };
   if (flags.daemon || flags.pm2 || flags.d) {
     spawnSync('pm2', ['delete', 'vibedock-portal'], { stdio: 'ignore' });
+    spawnSync('pm2', ['delete', 'vibedock-portal'], { env, stdio: 'ignore' });
     const res = spawnSync('pm2', ['start', serverEntry, '--name', 'vibedock-portal', '--cwd', PROJECT_ROOT], {
+      env,
       stdio: 'inherit',
     });
-    spawnSync('pm2', ['save'], { stdio: 'ignore' });
+    spawnSync('pm2', ['save'], { env, stdio: 'ignore' });
     process.exit(res.status ?? 0);
   }
   const res = spawnSync(process.execPath, [serverEntry], {
     cwd: PROJECT_ROOT,
+    env,
     stdio: 'inherit',
   });
   process.exit(res.status ?? 0);
@@ -1471,6 +1506,7 @@ async function main(): Promise<void> {
         '  vibedock db status                       查看数据库运行状态、纳管模式与已开通项目',
         '  vibedock db provision <id> [--types all] 为项目幂等开通 PostgreSQL/MySQL/MongoDB/Redis',
         '  vibedock db get <id> [--format env]      获取项目已开通或绑定的数据库连接串',
+        '  vibedock db backup [id] [--keep-days 7]  导出项目数据库备份至 /var/lib/vibedock/backups/databases',
         '  vibedock db down                         停止内置共享数据库容器',
         '  vibedock adopt <id> --upstream <url>     一键纳管本机/内网已有服务并自动挂载子域名与门户卡片',
         '  vibedock alloc [id]                      查询下一个空闲端口及项目 ID 占用状态',
