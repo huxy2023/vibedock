@@ -114,6 +114,27 @@ export interface IngressRule {
   };
 }
 
+export interface ProjectProcessMetrics {
+  pid: number;
+  cpuPercent: number;
+  memoryBytes: number;
+  elapsed?: string;
+}
+
+export interface HostSystemSummary {
+  cpuPercent: number;
+  cpuCores?: number;
+  loadAvg1m?: number;
+  uptimeSeconds?: number;
+  memoryPercent: number;
+  memoryUsedBytes: number;
+  memoryTotalBytes: number;
+  diskPercent: number;
+  diskUsedBytes: number;
+  diskTotalBytes: number;
+  monitorUrl?: string;
+}
+
 export interface CatalogProject {
   id: string;
   name: string;
@@ -127,6 +148,7 @@ export interface CatalogProject {
   configPath?: string;
   status?: 'online' | 'degraded';
   caddyConfig?: string;
+  metrics?: ProjectProcessMetrics | null;
   components: CatalogComponent[];
   ingressRules: IngressRule[];
   commands?: Array<{ label: string; command: string }>;
@@ -145,6 +167,7 @@ export interface CatalogData {
   };
   projects: CatalogProject[];
   generatedAt?: string;
+  system?: HostSystemSummary;
   summary?: {
     projects: number;
     components: number;

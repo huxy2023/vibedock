@@ -10,11 +10,12 @@ import {
   User as UserIcon,
   FileCode,
 } from 'lucide-react';
-import type { CatalogLayout, ProjectRecord } from '../types';
+import type { CatalogLayout, HostSystemSummary, ProjectRecord } from '../types';
 import { Badge, Button, Card, Input } from './ui';
 
 interface CatalogViewProps {
   projects: ProjectRecord[];
+  system?: HostSystemSummary | null;
   categories: string[];
   query: string;
   onChangeQuery: (q: string) => void;
@@ -29,6 +30,7 @@ interface CatalogViewProps {
 
 export const CatalogView: React.FC<CatalogViewProps> = ({
   projects,
+  system,
   categories,
   query,
   onChangeQuery,
@@ -175,6 +177,9 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
               .map((c) => c.port)
               .filter((p): p is number => typeof p === 'number');
             const isOnline = project.healthState !== 'offline';
+            const isMonitorCard =
+              /^(?:team-)?(?:beszel|host-monitor|server-monitor)$/i.test(project.id) &&
+              Boolean(system && typeof system.cpuPercent === 'number');
             return (
               <Card
                 key={project.id}
@@ -201,9 +206,94 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
                     </Badge>
                   </div>
 
-                  <p className="mt-2.5 line-clamp-2 text-xs leading-relaxed text-zinc-600">
-                    {project.summary || '暂无项目简介'}
-                  </p>
+                  {isMonitorCard && system ? (
+                    <a
+                      href={project.entryUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      title="点击打开 Beszel 主机监控面板"
+                      className="mt-3 grid grid-cols-3 gap-2"
+                    >
+                      <div className="rounded-md border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-2">
+                        <div className="flex items-baseline justify-between gap-1">
+                          <span className="text-[11px] font-medium text-zinc-600 whitespace-nowrap">CPU</span>
+                          <span className="font-mono text-[10px] text-zinc-400 whitespace-nowrap">
+                            {system.cpuCores || 8}核
+                          </span>
+                        </div>
+                        <div className="mt-0.5 mb-1.5 font-mono text-sm font-bold text-zinc-900 whitespace-nowrap">
+                          {system.cpuPercent}%
+                        </div>
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-zinc-200/80">
+                          <div
+                            className={`h-full rounded-full ${
+                              system.cpuPercent >= 85
+                                ? 'bg-red-500'
+                                : system.cpuPercent >= 70
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${Math.max(4, Math.min(100, system.cpuPercent))}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-2">
+                        <div className="flex items-baseline justify-between gap-1">
+                          <span className="text-[11px] font-medium text-zinc-600 whitespace-nowrap">内存</span>
+                          <span className="font-mono text-[10px] text-zinc-400 whitespace-nowrap">
+                            {(system.memoryUsedBytes / 1024 ** 3).toFixed(1)}/
+                            {(system.memoryTotalBytes / 1024 ** 3).toFixed(0)}G
+                          </span>
+                        </div>
+                        <div className="mt-0.5 mb-1.5 font-mono text-sm font-bold text-zinc-900 whitespace-nowrap">
+                          {system.memoryPercent}%
+                        </div>
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-zinc-200/80">
+                          <div
+                            className={`h-full rounded-full ${
+                              system.memoryPercent >= 85
+                                ? 'bg-red-500'
+                                : system.memoryPercent >= 75
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${Math.max(4, Math.min(100, system.memoryPercent))}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-2">
+                        <div className="flex items-baseline justify-between gap-1">
+                          <span className="text-[11px] font-medium text-zinc-600 whitespace-nowrap">磁盘</span>
+                          <span className="font-mono text-[10px] text-zinc-400 whitespace-nowrap">
+                            {(system.diskUsedBytes / 1024 ** 3).toFixed(0)}/
+                            {(system.diskTotalBytes / 1024 ** 3).toFixed(0)}G
+                          </span>
+                        </div>
+                        <div className="mt-0.5 mb-1.5 font-mono text-sm font-bold text-zinc-900 whitespace-nowrap">
+                          {system.diskPercent}%
+                        </div>
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-zinc-200/80">
+                          <div
+                            className={`h-full rounded-full ${
+                              system.diskPercent >= 85
+                                ? 'bg-red-500'
+                                : system.diskPercent >= 75
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${Math.max(4, Math.min(100, system.diskPercent))}%` }}
+                          />
+                        </div>
+                      </div>
+                    </a>
+                  ) : (
+                    <p className="mt-2.5 line-clamp-2 text-xs leading-relaxed text-zinc-600">
+                      {project.summary || '暂无项目简介'}
+                    </p>
+                  )}
 
                   <div className="mt-4 flex flex-wrap gap-1.5">
                     <Badge variant="outline" className="font-mono text-[11px]">

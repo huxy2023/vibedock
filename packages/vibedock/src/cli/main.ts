@@ -1492,7 +1492,7 @@ async function main(): Promise<void> {
   } else {
     console.log(
       [
-        'VibeDock CLI (v0.0.3) — 自建 AI-Native 团队应用与数据库云',
+        'VibeDock CLI (v0.0.5) — 自建 AI-Native 团队应用与数据库云',
         '',
         '常用命令:',
         '  vibedock setup                           一键安装 Ubuntu 生产底座 (自动识别已有 Nginx 或安装 Caddy)',

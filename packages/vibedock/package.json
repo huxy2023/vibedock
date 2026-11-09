@@ -1,6 +1,6 @@
 {
   "name": "vibedock",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "VibeDock — Self-Hosted AI-Native Team App & Database Cloud (Hono + TypeScript + Caddy + Docker DBs + AI Skill)",
   "type": "module",
   "main": "./dist/server.js",

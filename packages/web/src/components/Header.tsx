@@ -9,7 +9,7 @@ import {
   Terminal,
   ChevronDown,
 } from 'lucide-react';
-import type { User, ViewTab } from '../types';
+import type { HostSystemSummary, User, ViewTab } from '../types';
 import { Badge } from './ui';
 
 interface HeaderProps {
@@ -18,6 +18,7 @@ interface HeaderProps {
   onSelectView: (view: ViewTab) => void;
   onlineCount: number;
   totalCount: number;
+  system?: HostSystemSummary | null;
   onOpenPasswordModal: () => void;
   onLogout: () => void;
 }
@@ -28,6 +29,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectView,
   onlineCount,
   totalCount,
+  system,
   onOpenPasswordModal,
   onLogout,
 }) => {
@@ -66,18 +68,18 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white/95 backdrop-blur-xs">
       <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-zinc-900 text-white shadow-2xs">
+        <div className="flex items-center gap-3 shrink-0 whitespace-nowrap">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-white shadow-2xs">
             <Terminal className="h-4 w-4" />
           </div>
           <div className="flex items-center gap-2">
             <span className="text-base font-semibold tracking-tight text-zinc-900">VibeDock</span>
-            <span className="hidden text-zinc-300 sm:inline">/</span>
-            <span className="hidden text-xs font-medium text-zinc-500 sm:inline">
+            <span className="hidden text-zinc-300 lg:inline">/</span>
+            <span className="hidden text-xs font-medium text-zinc-500 lg:inline">
               研发与演示门户
             </span>
           </div>
-          <Badge variant={allHealthy ? 'success' : 'warning'} className="ml-1">
+          <Badge variant={allHealthy ? 'success' : 'warning'} className="ml-1 shrink-0 whitespace-nowrap">
             <span
               className={`h-1.5 w-1.5 rounded-full ${
                 allHealthy ? 'bg-emerald-500' : 'bg-amber-500'
@@ -87,7 +89,7 @@ export const Header: React.FC<HeaderProps> = ({
           </Badge>
         </div>
 
-        <nav className="flex items-center gap-1 rounded-lg bg-zinc-100/80 p-1" aria-label="主视图切换">
+        <nav className="flex shrink-0 items-center gap-1 rounded-lg bg-zinc-100/80 p-1 whitespace-nowrap" aria-label="主视图切换">
           {navItems.map((item) => {
             const active = activeView === item.id;
             return (
@@ -95,7 +97,7 @@ export const Header: React.FC<HeaderProps> = ({
                 key={item.id}
                 type="button"
                 onClick={() => onSelectView(item.id)}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer ${
+                className={`inline-flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-all cursor-pointer ${
                   active
                     ? 'bg-white text-zinc-900 shadow-2xs'
                     : 'text-zinc-600 hover:text-zinc-900'
@@ -108,7 +110,7 @@ export const Header: React.FC<HeaderProps> = ({
           })}
         </nav>
 
-        <div className="relative" ref={menuRef}>
+        <div className="relative shrink-0 whitespace-nowrap" ref={menuRef}>
           <button
             type="button"
             onClick={() => setDropdownOpen((prev) => !prev)}

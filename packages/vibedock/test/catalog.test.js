@@ -421,3 +421,54 @@ test('builds controlled start-service and activate commands and prunes expired d
   assert.equal(redisFailRes.errors.length, 1);
   assert.equal(redisFailRes.errors[0].engine, 'redis');
 });
+
+test('attaches host system summary, monitorUrl, and per-project process metrics to catalog snapshot', async () => {
+  const catalog = validateCatalog({
+    environment: { name: 'test' },
+    projects: [
+      {
+        id: 'beszel',
+        name: 'Beszel 主机监控',
+        components: [
+          {
+            id: 'hub',
+            name: 'Hub',
+            listeners: [{ id: 'http', protocol: 'http', host: '127.0.0.1', port: 39095 }],
+          },
+        ],
+        ingressRules: [
+          {
+            id: 'web',
+            match: { scheme: 'https', hosts: ['beszel.wl.example.com'], paths: ['/*'], protocol: 'http' },
+            target: { component: 'hub', listener: 'http' },
+          },
+        ],
+      },
+    ],
+  });
+
+  const service = createCatalogService(catalog, {
+    cacheMs: 0,
+    checker: async () => ({ online: true, checkedAt: '2026-11-09T00:00:00.000Z' }),
+    processCollector: async () =>
+      new Map([
+        [
+          'beszel',
+          { pid: 12345, cpuPercent: 0.4, memoryBytes: 28 * 1024 * 1024, elapsed: '01:20:00' },
+        ],
+      ]),
+  });
+
+  const snapshot = await service.snapshot();
+  assert.ok(snapshot.system);
+  assert.equal(typeof snapshot.system.cpuPercent, 'number');
+  assert.equal(typeof snapshot.system.memoryPercent, 'number');
+  assert.ok(snapshot.system.memoryTotalBytes > 0);
+  assert.equal(snapshot.system.monitorUrl, 'https://beszel.wl.example.com');
+  assert.deepEqual(snapshot.projects[0].metrics, {
+    pid: 12345,
+    cpuPercent: 0.4,
+    memoryBytes: 28 * 1024 * 1024,
+    elapsed: '01:20:00',
+  });
+});

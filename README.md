@@ -26,6 +26,9 @@
    - Linux 生产环境将所有配置、SQLite 数据库、TLS 证书、Caddy/Nginx 动态路由、SSH 密钥与已部署应用统一收口在 `/var/lib/vibedock`（可通过 `VIBEDOCK_HOME` 定制），随时执行 `npm i -g vibedock` 升级 CLI 绝不覆盖线上数据。
 6. **安全最小权限与受控运维审批**
    - 部署专用受限系统账号 `vibe-deploy`，仅通过 `sudoers` 白名单调用受控 CLI；内置在线 AI 运维助手，所有变更动作（重启进程、热重载网关）均需管理员显式批准并记录审计日志。
+7. **宿主机与进程级实时资源遥测 & Beszel 监控首卡联动**
+   - `/api/catalog` 自动采集宿主机真实水位（CPU 核数/负载、基于 `/proc/meminfo` `MemAvailable` 剔除系统文件缓存虚高的物理内存占用、根目录磁盘空间、运行时长）以及各应用本地监听端口对应的进程级指标（`CPU%`、`RSS 内存`、`PID`、`持续运行时长`）。
+   - 当部署或纳管 `beszel` / `host-monitor` / `server-monitor` 主机监控服务时，门户自动将其置顶为左上角**第 1 张实时硬件遥测卡片**（内嵌 CPU / 内存 / 磁盘 3 列三色进度条微仪表，点击直达深度监控大盘），并在应用详情抽屉内以 4 宫格微卡片展示进程级实时资源占用。
 
 ---
 
@@ -149,7 +152,7 @@ sudo vibedock doctor
 ```bash
 pnpm install
 pnpm build       # 构建前端 (@vibedock/web) 与服务端 (vibedock)
-pnpm test        # 运行全量自动化测试 (30 项单元与集成测试)
+pnpm test        # 运行全量自动化测试 (37 项单元与集成测试)
 pnpm dev:server  # 启动本地开发门户 (默认监听 http://127.0.0.1:39090)
 pnpm docs:dev    # 启动 VitePress 文档站
 ```

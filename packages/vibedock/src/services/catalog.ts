@@ -1,8 +1,13 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { buildCaddyConfig, ingressScheme, listenerScope } from '../deploy/caddy.js';
-import type { CatalogData, CatalogListener } from '../types.js';
+import type { CatalogData, CatalogListener, CatalogProject, HostSystemSummary, ProjectProcessMetrics } from '../types.js';
+
+const execFileAsync = promisify(execFile);
 
 export const SHARED_DATABASES = [
   { id: 'mysql', name: 'MySQL 8.0', port: 3306, host: '127.0.0.1', envKey: 'MYSQL_URL', isolation: '独立库 + 专属账号 proj_<id>', exampleUrl: 'mysql://proj_<id>:<pwd>@<host>:3306/proj_<id>' },
@@ -170,11 +175,217 @@ export interface CatalogServiceOptions {
   cacheMs?: number;
   dbHost?: string;
   checker?: (listener: { host: string; port: number }) => Promise<{ online: boolean; checkedAt?: string }>;
+  processCollector?: (projects: CatalogProject[]) => Promise<Map<string, ProjectProcessMetrics>>;
+}
+
+function round1(val: number): number {
+  if (!Number.isFinite(val) || val < 0) return 0;
+  return Math.round(val * 10) / 10;
+}
+
+function clampPct(val: number): number {
+  if (!Number.isFinite(val) || val < 0) return 0;
+  if (val > 100) return 100;
+  return round1(val);
+}
+
+let prevCpuTotal = 0;
+let prevCpuBusy = 0;
+
+function readCpuTicks(): { total: number; busy: number } {
+  const cpus = os.cpus();
+  let total = 0;
+  let busy = 0;
+  for (const cpu of cpus) {
+    const t = cpu.times;
+    const b = t.user + t.nice + t.sys + t.irq;
+    busy += b;
+    total += b + t.idle;
+  }
+  return { total, busy };
+}
+
+export function collectHostSystemSummary(projects: CatalogProject[] = []): HostSystemSummary {
+  const curr = readCpuTicks();
+  let cpuPercent = 0;
+  if (prevCpuTotal > 0 && curr.total > prevCpuTotal) {
+    cpuPercent = clampPct(((curr.busy - prevCpuBusy) / (curr.total - prevCpuTotal)) * 100);
+  } else {
+    const cores = Math.max(1, os.cpus().length);
+    cpuPercent = clampPct(((os.loadavg()[0] || 0) / cores) * 100);
+  }
+  prevCpuTotal = curr.total;
+  prevCpuBusy = curr.busy;
+
+  let memoryTotalBytes = os.totalmem();
+  let memoryAvailableBytes = os.freemem();
+  try {
+    if (fs.existsSync('/proc/meminfo')) {
+      const raw = fs.readFileSync('/proc/meminfo', 'utf8');
+      const totalMatch = raw.match(/^MemTotal:\s+(\d+)\s*kB/m);
+      const availMatch = raw.match(/^MemAvailable:\s+(\d+)\s*kB/m);
+      if (totalMatch && availMatch) {
+        memoryTotalBytes = Number(totalMatch[1]) * 1024;
+        memoryAvailableBytes = Number(availMatch[1]) * 1024;
+      }
+    }
+  } catch {
+    // fallback to os.totalmem/freemem
+  }
+  const memoryUsedBytes = Math.max(0, memoryTotalBytes - memoryAvailableBytes);
+  const memoryPercent = memoryTotalBytes > 0 ? clampPct((memoryUsedBytes / memoryTotalBytes) * 100) : 0;
+
+  let diskTotalBytes = 0;
+  let diskUsedBytes = 0;
+  let diskPercent = 0;
+  try {
+    const stat = fs.statfsSync('/');
+    diskTotalBytes = stat.bsize * stat.blocks;
+    const availBytes = stat.bsize * stat.bavail;
+    const freeBytes = stat.bsize * stat.bfree;
+    diskUsedBytes = Math.max(0, diskTotalBytes - freeBytes);
+    const denom = diskUsedBytes + availBytes > 0 ? diskUsedBytes + availBytes : diskTotalBytes;
+    diskPercent = denom > 0 ? clampPct((diskUsedBytes / denom) * 100) : 0;
+  } catch {
+    // ignore if statfsSync unavailable
+  }
+
+  let monitorUrl: string | undefined;
+  const monitorProj = projects.find((p) =>
+    /^(?:team-)?(?:beszel|host-monitor|server-monitor|netdata|glances)$/i.test(p.id),
+  );
+  if (monitorProj) {
+    const rule = monitorProj.ingressRules?.[0];
+    const host = rule?.match?.hosts?.[0];
+    if (host) {
+      const scheme = rule?.match?.scheme || 'https';
+      monitorUrl = `${scheme}://${host}`;
+    }
+  }
+
+  let uptimeSeconds = 0;
+  try {
+    uptimeSeconds = Math.floor(os.uptime());
+  } catch {
+    // Restricted sandboxes (e.g. macOS Seatbelt) may block sysctl kern.boottime
+  }
+
+  return {
+    cpuPercent,
+    cpuCores: Math.max(1, os.cpus().length),
+    loadAvg1m: round1(os.loadavg()[0] || 0),
+    uptimeSeconds,
+    memoryPercent,
+    memoryUsedBytes,
+    memoryTotalBytes,
+    diskPercent,
+    diskUsedBytes,
+    diskTotalBytes,
+    ...(monitorUrl ? { monitorUrl } : {}),
+  };
+}
+
+export async function collectProcessMetrics(
+  projects: CatalogProject[],
+): Promise<Map<string, ProjectProcessMetrics>> {
+  const result = new Map<string, ProjectProcessMetrics>();
+  try {
+    const [psRes, portRes] = await Promise.all([
+      execFileAsync('ps', ['-axo', 'pid,pcpu,rss,etime,comm,args'], {
+        timeout: 2500,
+        maxBuffer: 2 * 1024 * 1024,
+      }).catch(() => ({ stdout: '' })),
+      (process.platform === 'linux'
+        ? execFileAsync('ss', ['-lntp'], { timeout: 2000 })
+        : execFileAsync('lsof', ['-iTCP', '-sTCP:LISTEN', '-P', '-n'], { timeout: 2000 })
+      ).catch(() => ({ stdout: '' })),
+    ]);
+
+    const portMap = new Map<number, number>();
+    if (process.platform === 'linux') {
+      for (const line of portRes.stdout.split('\n')) {
+        const pm = line.match(/:(\d+)\s/);
+        const pidm = line.match(/pid=(\d+)/);
+        if (pm && pidm && !portMap.has(Number(pm[1]))) {
+          portMap.set(Number(pm[1]), Number(pidm[1]));
+        }
+      }
+    } else {
+      for (const line of portRes.stdout.split('\n').slice(1)) {
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 9) continue;
+        const pid = Number.parseInt(cols[1], 10);
+        const portMatch = cols[8]?.match(/:(\d+)$/);
+        if (portMatch && pid > 0 && !portMap.has(Number(portMatch[1]))) {
+          portMap.set(Number(portMatch[1]), pid);
+        }
+      }
+    }
+
+    const procs: Array<{ pid: number; cpuPercent: number; memoryBytes: number; elapsed: string; args: string }> = [];
+    for (const line of psRes.stdout.split('\n').slice(1)) {
+      const m = line.trim().match(/^(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$/);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      const args = m[6] || m[5];
+      if (/\b(ps\s+-axo|zsh|bash|sh\s+-c|grep)\b|PM2\s+v[\d.]+:\s+God/i.test(args)) continue;
+      procs.push({
+        pid,
+        cpuPercent: round1(Number(m[2])),
+        memoryBytes: Math.max(0, Number(m[3]) * 1024),
+        elapsed: m[4],
+        args,
+      });
+    }
+
+    for (const project of projects) {
+      const localPorts = (project.components || []).flatMap((c) =>
+        (c.listeners || []).filter((l) => l.scope !== 'remote').map((l) => l.port),
+      );
+      if (!localPorts.length) continue;
+
+      const matched = new Map<number, (typeof procs)[0]>();
+      for (const port of localPorts) {
+        const pid = portMap.get(port);
+        const proc = pid ? procs.find((pr) => pr.pid === pid) : undefined;
+        if (proc) matched.set(proc.pid, proc);
+      }
+
+      if (matched.size === 0) {
+        const slug = project.id.replace(/^team-/, '');
+        const needles = [
+          project.projectPath,
+          `/apps/${project.id}/`,
+          `/apps/${slug}/`,
+        ].filter((s): s is string => Boolean(s && s.length > 3));
+        for (const proc of procs) {
+          if (needles.some((n) => proc.args.includes(n))) {
+            matched.set(proc.pid, proc);
+          }
+        }
+      }
+
+      if (matched.size > 0) {
+        const list = [...matched.values()];
+        result.set(project.id, {
+          pid: list[0].pid,
+          cpuPercent: round1(list.reduce((sum, item) => sum + item.cpuPercent, 0)),
+          memoryBytes: list.reduce((sum, item) => sum + item.memoryBytes, 0),
+          elapsed: list[0].elapsed,
+        });
+      }
+    }
+  } catch {
+    // ignore process collection failures
+  }
+  return result;
 }
 
 export function createCatalogService(initialCatalog: CatalogData, options: CatalogServiceOptions = {}) {
   const cacheMs = options.cacheMs ?? 5_000;
   const checker = options.checker ?? checkTcpListener;
+  const processCollector =
+    options.processCollector ?? (options.checker ? async () => new Map() : collectProcessMetrics);
   const catalogFile = options.catalogFile;
 
   let currentCatalog = initialCatalog;
@@ -212,7 +423,10 @@ export function createCatalogService(initialCatalog: CatalogData, options: Catal
       }
     }
 
-    await Promise.all(listenerChecks);
+    const [ , processMetricsMap] = await Promise.all([
+      Promise.all(listenerChecks),
+      processCollector(cloned.projects),
+    ]);
 
     for (const project of cloned.projects) {
       for (const component of project.components) {
@@ -223,6 +437,7 @@ export function createCatalogService(initialCatalog: CatalogData, options: Catal
       }
       project.status = project.components.every((component) => component.online) ? 'online' : 'degraded';
       project.caddyConfig = buildCaddyConfig(project);
+      project.metrics = processMetricsMap.get(project.id) || null;
     }
 
     const dbHost = cloned.environment?.address || options.dbHost || '127.0.0.1';
@@ -284,6 +499,7 @@ export function createCatalogService(initialCatalog: CatalogData, options: Catal
     }
 
     cloned.generatedAt = new Date().toISOString();
+    cloned.system = collectHostSystemSummary(cloned.projects);
     cloned.summary = {
       projects: cloned.projects.length,
       components: cloned.projects.reduce((sum, project) => sum + project.components.length, 0),

@@ -398,7 +398,7 @@ export function createMcpRoutes(deps: McpRouteDeps): Hono<AppEnv> {
           result: {
             protocolVersion: '2024-11-05',
             capabilities: { tools: {} },
-            serverInfo: { name: 'vibedock-mcp', version: '0.0.4' },
+            serverInfo: { name: 'vibedock-mcp', version: '0.0.5' },
           },
         });
       }

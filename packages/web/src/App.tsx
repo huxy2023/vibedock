@@ -67,8 +67,17 @@ function normalizeCatalogResponse(raw: any): CatalogResponse {
       components,
       caddyConfig: p.caddyConfig || '',
       healthState: p.status === 'degraded' ? 'offline' : 'online',
+      metrics: p.metrics || null,
     };
   });
+
+  const monitorIdx = projects.findIndex((p) =>
+    /^(?:team-)?(?:beszel|host-monitor|server-monitor)$/i.test(p.id),
+  );
+  if (monitorIdx > 0) {
+    const [monitorProj] = projects.splice(monitorIdx, 1);
+    projects.unshift(monitorProj);
+  }
 
   const categories = Array.from(new Set(projects.map((p) => p.category).filter(Boolean)));
   const databases = (raw?.dx?.databases || raw?.databases || []).map((db: any) => ({
@@ -98,6 +107,7 @@ function normalizeCatalogResponse(raw: any): CatalogResponse {
     },
     usedPorts: raw?.dx?.portPool?.usedPorts || [],
     provisionedProjects: raw?.dx?.provisionedProjects || [],
+    system: raw?.system || null,
     categories,
     databases,
     projects,
@@ -119,7 +129,11 @@ export const App: React.FC = () => {
   const loadCatalog = useCallback(async () => {
     try {
       const raw = await apiFetch<any>('/api/catalog');
-      setCatalog(normalizeCatalogResponse(raw));
+      const next = normalizeCatalogResponse(raw);
+      setCatalog(next);
+      setSelectedProject((prev) =>
+        prev ? next.projects.find((p) => p.id === prev.id) || null : null,
+      );
     } catch {
       // ignore if unauthenticated
     }
@@ -171,6 +185,7 @@ export const App: React.FC = () => {
         onSelectView={setActiveView}
         onlineCount={onlineCount}
         totalCount={projects.length}
+        system={catalog?.system}
         onOpenPasswordModal={() => setPasswordModalOpen(true)}
         onLogout={handleLogout}
       />
@@ -179,6 +194,7 @@ export const App: React.FC = () => {
         {activeView === 'catalog' && (
           <CatalogView
             projects={projects}
+            system={catalog?.system}
             categories={catalog?.categories || []}
             query={query}
             onChangeQuery={setQuery}

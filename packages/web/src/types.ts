@@ -27,6 +27,27 @@ export interface ProjectComponent {
   runtimeCommand?: string;
 }
 
+export interface ProjectProcessMetrics {
+  pid: number;
+  cpuPercent: number;
+  memoryBytes: number;
+  elapsed?: string;
+}
+
+export interface HostSystemSummary {
+  cpuPercent: number;
+  cpuCores?: number;
+  loadAvg1m?: number;
+  uptimeSeconds?: number;
+  memoryPercent: number;
+  memoryUsedBytes: number;
+  memoryTotalBytes: number;
+  diskPercent: number;
+  diskUsedBytes: number;
+  diskTotalBytes: number;
+  monitorUrl?: string;
+}
+
 export interface ProjectRecord {
   id: string;
   name: string;
@@ -42,6 +63,7 @@ export interface ProjectRecord {
   components: ProjectComponent[];
   caddyConfig?: string;
   healthState?: 'online' | 'offline' | 'checking';
+  metrics?: ProjectProcessMetrics | null;
 }
 
 export interface DatabaseCatalogEntry {
@@ -89,6 +111,7 @@ export interface CatalogResponse {
   };
   usedPorts?: UsedPortRecord[];
   provisionedProjects?: Array<string | ProvisionedProjectDbSummary>;
+  system?: HostSystemSummary | null;
   categories: string[];
   databases: DatabaseCatalogEntry[];
   projects: ProjectRecord[];

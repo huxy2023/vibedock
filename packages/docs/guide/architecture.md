@@ -47,7 +47,7 @@ vibedock/
 - **`http/`**：Hono 路由层与鉴权中间件（`auth.ts`, `catalog.ts`, `assistant.ts`, `operations.ts`），支持流式 SSE（`streamSSE`）。
 - **`services/`**：
   - `auth.ts`：基于 Node 内置 `node:sqlite` 的会话、密码哈希与邀请码服务（强制 WAL 与 `0600` 权限）。
-  - `catalog.ts`：内存目录索引与原子落盘写入，支持跨进程 `mtimeMs` 变化自动热刷新。
+  - `catalog.ts`：内存目录索引与原子落盘写入，支持跨进程 `mtimeMs` 变化自动热刷新，并在生成快照时同步采集宿主机真实水位（`collectHostSystemSummary`）与各项目本地监听端口的进程资源占用（`collectProcessMetrics`）。
   - `actions.ts`：高危运维动作（重启 PM2 进程、热重载 Caddy）的审批状态机与审计日志。
   - `assistant/`：多协议 AI Agent（OpenAI / Anthropic / Gemini / DeepSeek），内置沙盒文件只读工具与零配置本地兜底诊断。
 - **`deploy/`**：

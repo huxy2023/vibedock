@@ -26,4 +26,7 @@ features:
   - icon: 🛡️
     title: 统一状态收口与最小权限
     details: 服务端所有配置、证书、SQLite 与应用统一收口于 /var/lib/vibedock，npm 升级绝不丢数据；受限账号 vibe-deploy 仅通过 sudoers 白名单发布。
+  - icon: 📊
+    title: 宿主机与进程级实时资源遥测
+    details: 内置零依赖宿主机水位（CPU、剔除 Page Cache 的真实物理内存、磁盘）与进程级指标采集，支持 Beszel 首卡 3 列实时遥测仪表与详情抽屉 4 宫格展示。
 ---

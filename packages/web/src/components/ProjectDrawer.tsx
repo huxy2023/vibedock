@@ -20,6 +20,18 @@ interface ProjectDrawerProps {
   onProjectUpdated: () => void;
 }
 
+function formatProcessElapsed(raw?: string): string {
+  const s = String(raw || '').trim();
+  if (!s) return '-';
+  const dayMatch = s.match(/^(\d+)-(\d+):(\d+):(\d+)$/);
+  if (dayMatch) return `${Number(dayMatch[1])}d ${Number(dayMatch[2])}h`;
+  const hourMatch = s.match(/^(\d+):(\d+):(\d+)$/);
+  if (hourMatch) return `${Number(hourMatch[1])}h ${Number(hourMatch[2])}m`;
+  const minMatch = s.match(/^(\d+):(\d+)$/);
+  if (minMatch) return `${Number(minMatch[1])}m ${Number(minMatch[2])}s`;
+  return s;
+}
+
 export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   project,
   user,
@@ -136,6 +148,34 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
                 </Badge>
               </div>
             </div>
+            {project.metrics && project.metrics.memoryBytes > 0 && (
+              <div className="col-span-2 grid grid-cols-4 gap-2 pt-1">
+                <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/70 px-3 py-2">
+                  <span className="block text-[11px] text-zinc-500 whitespace-nowrap">CPU 占用</span>
+                  <strong className="mt-0.5 block font-mono text-xs font-semibold text-zinc-900">
+                    {project.metrics.cpuPercent}%
+                  </strong>
+                </div>
+                <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/70 px-3 py-2">
+                  <span className="block text-[11px] text-zinc-500 whitespace-nowrap">内存占用</span>
+                  <strong className="mt-0.5 block font-mono text-xs font-semibold text-zinc-900">
+                    {Math.round(project.metrics.memoryBytes / (1024 * 1024))} MB
+                  </strong>
+                </div>
+                <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/70 px-3 py-2">
+                  <span className="block text-[11px] text-zinc-500 whitespace-nowrap">进程 PID</span>
+                  <strong className="mt-0.5 block font-mono text-xs font-semibold text-zinc-900">
+                    {project.metrics.pid}
+                  </strong>
+                </div>
+                <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/70 px-3 py-2">
+                  <span className="block text-[11px] text-zinc-500 whitespace-nowrap">运行时长</span>
+                  <strong className="mt-0.5 block font-mono text-xs font-semibold text-zinc-900">
+                    {formatProcessElapsed(project.metrics.elapsed)}
+                  </strong>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2.5 border-t border-zinc-100 pt-5">
